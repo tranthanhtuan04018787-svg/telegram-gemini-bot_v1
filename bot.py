@@ -31,7 +31,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 async def call_gemini(prompt: str) -> str:
-    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
+    models_to_try = ["gemini-2.5-flash"]
     config = types.GenerateContentConfig(
         max_output_tokens=1000,
         temperature=0.7,
