@@ -32,53 +32,48 @@ async def call_gemini(prompt: str) -> str:
 
     try:
         async with aiohttp.ClientSession() as session:
-            # BƯỚC 1: HỎI GOOGLE XEM KEY NÀY ĐƯỢC PHÉP DÙNG NHỮNG MODEL NÀO
+            # BƯỚC 1: LẤY TOÀN BỘ DANH SÁCH MODEL KHẢ DỤNG
             list_url = f"{base_url}/models?key={api_key}"
             async with session.get(list_url, timeout=10) as list_resp:
                 if list_resp.status != 200:
-                    return f"Lỗi xác thực Key (Mã {list_resp.status}): {await list_resp.text()}"
+                    return f"Lỗi xác thực Key: {await list_resp.text()}"
 
                 data = await list_resp.json()
-                
-                # Lọc ra các model có hỗ trợ chức năng trả lời tin nhắn (generateContent)
                 valid_models = [
                     m['name'] for m in data.get('models', [])
                     if 'generateContent' in m.get('supportedGenerationMethods', [])
                 ]
 
                 if not valid_models:
-                    return "API Key hợp lệ nhưng tài khoản Google của bạn không có quyền dùng bất kỳ model AI nào."
+                    return "Tài khoản Google của bạn không có quyền dùng bất kỳ model AI nào."
 
-                # Thuật toán chọn model tốt nhất trong danh sách Google vừa trả về
-                chosen_model = valid_models[0] # Lấy model đầu tiên làm mặc định
-                for m in valid_models:
-                    if 'gemini-1.5-flash' in m:
-                        chosen_model = m
-                        break
-                    elif 'gemini-1.5-pro' in m:
-                        chosen_model = m
-                        break
-                    elif 'gemini-pro' in m:
-                        chosen_model = m
+            # Sắp xếp ưu tiên các model 'flash' lên đầu vì chúng thường miễn phí và nhanh
+            valid_models.sort(key=lambda x: ('flash' not in x, x))
 
-            # BƯỚC 2: GỬI CÂU HỎI VÀO CHÍNH MODEL VỪA TÌM ĐƯỢC
-            gen_url = f"{base_url}/{chosen_model}:generateContent?key={api_key}"
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 800, "temperature": 0.7}
-            }
+            error_logs = []
+            # BƯỚC 2: THỬ LẦN LƯỢT TỪNG MODEL CHO ĐẾN KHI THÀNH CÔNG
+            for chosen_model in valid_models:
+                gen_url = f"{base_url}/{chosen_model}:generateContent?key={api_key}"
+                payload = {
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"maxOutputTokens": 800, "temperature": 0.7}
+                }
 
-            async with session.post(gen_url, headers=headers, json=payload, timeout=20) as gen_resp:
-                if gen_resp.status == 200:
-                    gen_data = await gen_resp.json()
-                    text = gen_data['candidates'][0]['content']['parts'][0]['text']
-                    
-                    # Báo cáo nhẹ cho bạn biết bot đã tự động tìm thấy model nào
-                    model_short = chosen_model.replace("models/", "")
-                    return f"[Đã tự động cấp cứu bằng: {model_short}]\n\n{text}"
-                else:
-                    error_text = await gen_resp.text()
-                    return f"Lỗi khi gọi model {chosen_model}: {error_text}"
+                async with session.post(gen_url, headers=headers, json=payload, timeout=20) as gen_resp:
+                    if gen_resp.status == 200:
+                        gen_data = await gen_resp.json()
+                        try:
+                            text = gen_data['candidates'][0]['content']['parts'][0]['text']
+                            model_short = chosen_model.replace("models/", "")
+                            return f"[Đã kết nối thành công: {model_short}]\n\n{text}"
+                        except (KeyError, IndexError):
+                            continue # Lỗi dữ liệu trống, thử model khác
+                    else:
+                        # Bị dính limit: 0 (429), 404, hoặc 503 -> Ghi nhận và đi tiếp sang model khác
+                        error_logs.append(f"{chosen_model.replace('models/', '')}: {gen_resp.status}")
+                        continue
+
+            return f"Toàn bộ model đều bị Google chặn Free Tier. Bị chặn tại: {', '.join(error_logs)}"
 
     except Exception as e:
         return f"Lỗi kết nối mạng: {str(e)}"
