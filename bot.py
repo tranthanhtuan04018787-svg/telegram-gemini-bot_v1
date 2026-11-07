@@ -30,19 +30,18 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 async def call_gemini(prompt: str) -> str:
-    # BỔ SUNG: Thêm model Pro và luân chuyển giữa các cụm máy chủ khác nhau
+    # Ưu tiên model 8b (siêu nhẹ, chống nghẽn cực tốt) và các model bản chuẩn
     models_to_try = [
-        "gemini-2.5-pro",
-        "gemini-1.5-pro",
-        "gemini-flash-latest",
-        "gemini-3.8-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro"
     ]
     config = types.GenerateContentConfig(
         max_output_tokens=800,
         temperature=0.7,
     )
 
-    last_error = ""
+    error_logs = []
     for model_name in models_to_try:
         try:
             response = await client.aio.models.generate_content(
@@ -53,13 +52,14 @@ async def call_gemini(prompt: str) -> str:
             if response.text:
                 return response.text
         except Exception as e:
-            last_error = repr(e)
-            # BỔ SUNG: Ngăn chặn spam bằng cách nghỉ 1s trước khi đổi model
-            await asyncio.sleep(1.0)
+            # Thu thập lỗi của TỪNG model thay vì chỉ lấy lỗi cuối cùng
+            error_msg = str(e).replace('\n', ' ').strip()
+            error_logs.append(f"- {model_name}: {error_msg[:100]}...")
+            await asyncio.sleep(1.5)
             continue
 
-    return f"Google từ chối phản hồi: {last_error}"
-
+    # Nếu cả 3 model đều sập, in ra báo cáo lỗi chi tiết
+    return "Tất cả máy chủ đều từ chối. Báo cáo chi tiết:\n" + "\n".join(error_logs)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot AI đã sẵn sàng hoạt động!")
