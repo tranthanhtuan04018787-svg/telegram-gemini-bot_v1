@@ -20,18 +20,14 @@ logging.basicConfig(
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # Biến môi trường mới để nhận báo cáo
 PORT = int(os.getenv("PORT", 8080))
 
 if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
     raise ValueError("Thiếu biến môi trường TELEGRAM_BOT_TOKEN hoặc GEMINI_API_KEY!")
 
 async def call_gemini(prompt: str) -> str:
-    # Ưu tiên dòng 3.1 và 3.0 flash (chính là model vừa chạy thành công)
-    models_to_try = [
-        "gemini-3.1-flash",
-        "gemini-3-flash-preview"
-    ]
-    
+    models_to_try = ["gemini-3.1-flash", "gemini-3-flash-preview"]
     base_url = "https://generativelanguage.googleapis.com/v1beta"
     headers = {'Content-Type': 'application/json'}
     payload = {
@@ -48,12 +44,10 @@ async def call_gemini(prompt: str) -> str:
                     if gen_resp.status == 200:
                         gen_data = await gen_resp.json()
                         try:
-                            # Lấy nội dung trả lời (không chèn thêm các dòng chữ báo cáo kỹ thuật)
                             return gen_data['candidates'][0]['content']['parts'][0]['text']
                         except (KeyError, IndexError):
-                            continue # Thử model dự phòng nếu dữ liệu trống
+                            continue 
                     elif gen_resp.status in [429, 503]:
-                        # Nếu model chính bận/hết hạn mức, nghỉ 1s rồi chuyển sang model dự phòng
                         await asyncio.sleep(1.0)
                         continue
 
@@ -63,15 +57,23 @@ async def call_gemini(prompt: str) -> str:
         return "Xin lỗi, kết nối mạng đang gián đoạn. Bạn thử lại nhé!"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Chào bạn! Tôi là trợ lý AI (Gemini 3.1). Tôi có thể giúp gì cho bạn hôm nay?")
+    await update.message.reply_text("Chào bạn! Tôi là trợ lý AI. Tôi có thể giúp gì cho bạn hôm nay?")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
-    chat_id = update.effective_chat.id
+    chat_id = str(update.effective_chat.id)
+    sender_name = update.message.from_user.full_name
 
-    # Hiện trạng thái "Bot đang gõ..."
+    # 1. BÁO CÁO CHO ADMIN (NẾU NGƯỜI GỬI KHÔNG PHẢI LÀ ADMIN)
+    if ADMIN_CHAT_ID and chat_id != ADMIN_CHAT_ID:
+        try:
+            report_msg = f"🔔 **Có tin nhắn mới tới Bot!**\n👤 Từ: {sender_name}\n💬 Nội dung: {user_text}"
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_msg)
+        except Exception as e:
+            logging.error(f"Không thể gửi báo cáo cho Admin: {e}")
+
+    # 2. BOT TRẢ LỜI NGƯỜI NHẮN
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-
     try:
         reply_content = await asyncio.wait_for(call_gemini(user_text), timeout=30.0)
         await update.message.reply_text(reply_content)
