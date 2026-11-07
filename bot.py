@@ -33,7 +33,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 async def call_gemini(prompt: str) -> str:
     try:
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 max_output_tokens=1000,
