@@ -26,42 +26,65 @@ if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
     raise ValueError("Thiếu biến môi trường TELEGRAM_BOT_TOKEN hoặc GEMINI_API_KEY!")
 
 async def call_gemini(prompt: str) -> str:
-    # Gọi trực tiếp REST API chuẩn v1beta, bỏ qua thư viện SDK bị lỗi của Google
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    api_key = GEMINI_API_KEY
+    base_url = "https://generativelanguage.googleapis.com/v1beta"
     headers = {'Content-Type': 'application/json'}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "maxOutputTokens": 800,
-            "temperature": 0.7
-        }
-    }
 
-    # Cơ chế tự động thử lại 3 lần nếu dính lỗi 503 (quá tải cục bộ)
-    for attempt in range(3):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload, timeout=20) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        try:
-                            return data['candidates'][0]['content']['parts'][0]['text']
-                        except (KeyError, IndexError):
-                            return "AI trả về dữ liệu trống."
-                    elif response.status in [503, 429]: 
-                        # Nếu máy chủ bận, nghỉ 2 giây rồi gọi lại
-                        await asyncio.sleep(2.0)
-                        continue
-                    else:
-                        error_data = await response.text()
-                        return f"Lỗi máy chủ Google (Mã {response.status}): {error_data}"
-        except Exception as e:
-            return f"Lỗi kết nối mạng: {str(e)}"
-    
-    return "Máy chủ Google hiện đang quá tải sau nhiều lần thử nghiệm. Vui lòng nhắn lại sau 1-2 phút nhé!"
+    try:
+        async with aiohttp.ClientSession() as session:
+            # BƯỚC 1: HỎI GOOGLE XEM KEY NÀY ĐƯỢC PHÉP DÙNG NHỮNG MODEL NÀO
+            list_url = f"{base_url}/models?key={api_key}"
+            async with session.get(list_url, timeout=10) as list_resp:
+                if list_resp.status != 200:
+                    return f"Lỗi xác thực Key (Mã {list_resp.status}): {await list_resp.text()}"
+
+                data = await list_resp.json()
+                
+                # Lọc ra các model có hỗ trợ chức năng trả lời tin nhắn (generateContent)
+                valid_models = [
+                    m['name'] for m in data.get('models', [])
+                    if 'generateContent' in m.get('supportedGenerationMethods', [])
+                ]
+
+                if not valid_models:
+                    return "API Key hợp lệ nhưng tài khoản Google của bạn không có quyền dùng bất kỳ model AI nào."
+
+                # Thuật toán chọn model tốt nhất trong danh sách Google vừa trả về
+                chosen_model = valid_models[0] # Lấy model đầu tiên làm mặc định
+                for m in valid_models:
+                    if 'gemini-1.5-flash' in m:
+                        chosen_model = m
+                        break
+                    elif 'gemini-1.5-pro' in m:
+                        chosen_model = m
+                        break
+                    elif 'gemini-pro' in m:
+                        chosen_model = m
+
+            # BƯỚC 2: GỬI CÂU HỎI VÀO CHÍNH MODEL VỪA TÌM ĐƯỢC
+            gen_url = f"{base_url}/{chosen_model}:generateContent?key={api_key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": 800, "temperature": 0.7}
+            }
+
+            async with session.post(gen_url, headers=headers, json=payload, timeout=20) as gen_resp:
+                if gen_resp.status == 200:
+                    gen_data = await gen_resp.json()
+                    text = gen_data['candidates'][0]['content']['parts'][0]['text']
+                    
+                    # Báo cáo nhẹ cho bạn biết bot đã tự động tìm thấy model nào
+                    model_short = chosen_model.replace("models/", "")
+                    return f"[Đã tự động cấp cứu bằng: {model_short}]\n\n{text}"
+                else:
+                    error_text = await gen_resp.text()
+                    return f"Lỗi khi gọi model {chosen_model}: {error_text}"
+
+    except Exception as e:
+        return f"Lỗi kết nối mạng: {str(e)}"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot AI đã sẵn sàng hoạt động!")
+    await update.message.reply_text("Bot AI đã sẵn sàng hoạt động bằng cơ chế dò model tự động!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
@@ -73,7 +96,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_content = await asyncio.wait_for(call_gemini(user_text), timeout=35.0)
         await update.message.reply_text(reply_content)
     except asyncio.TimeoutError:
-        await update.message.reply_text("Hết thời gian chờ phản hồi (35s). Bạn hãy gửi lại nhé!")
+        await update.message.reply_text("Máy chủ phản hồi chậm (hơn 35s). Bạn gửi lại nhé!")
     except Exception as e:
         await update.message.reply_text(f"Lỗi hệ thống: {str(e)}")
 
