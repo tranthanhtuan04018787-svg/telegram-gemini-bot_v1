@@ -31,31 +31,20 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 async def call_gemini(prompt: str) -> str:
-    models_to_try = ["gemini-2.5-flash"]
-    config = types.GenerateContentConfig(
-        max_output_tokens=1000,
-        temperature=0.7,
-    )
-    for model_name in models_to_try:
-        for attempt in range(2):
-            try:
-                response = await client.aio.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=config,
-                )
-                if response.text:
-                    return response.text
-            except APIError as e:
-                if e.code in [503, 404] or "503" in str(e) or "404" in str(e):
-                    await asyncio.sleep(1.5)
-                    continue
-                raise e
-            except Exception:
-                await asyncio.sleep(1.0)
-                continue
-
-    return "Máy chủ AI hiện đang bận, bạn vui lòng gửi lại sau vài giây nhé!"
+    try:
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                max_output_tokens=1000,
+                temperature=0.7,
+            ),
+        )
+        if response.text:
+            return response.text
+        return "AI không trả về nội dung văn bản."
+    except Exception as e:
+        return f"Lỗi chi tiết từ Google: {e}"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
