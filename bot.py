@@ -30,7 +30,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 async def call_gemini(prompt: str) -> str:
-    # Luân chuyển giữa các cụm máy chủ khác nhau: Pro (ổn định) và Flash
+    # BỔ SUNG: Thêm model Pro và luân chuyển giữa các cụm máy chủ khác nhau
     models_to_try = [
         "gemini-2.5-pro",
         "gemini-1.5-pro",
@@ -54,7 +54,7 @@ async def call_gemini(prompt: str) -> str:
                 return response.text
         except Exception as e:
             last_error = repr(e)
-            # Nếu cụm model này quá tải (503) hoặc hết hạn ngạch (429), chờ nhẹ 1s rồi sang cụm khác
+            # BỔ SUNG: Ngăn chặn spam bằng cách nghỉ 1s trước khi đổi model
             await asyncio.sleep(1.0)
             continue
 
