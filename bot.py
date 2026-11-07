@@ -13,7 +13,6 @@ from telegram.ext import (
 )
 from google import genai
 from google.genai import types
-from google.genai.errors import APIError
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -31,41 +30,52 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 async def call_gemini(prompt: str) -> str:
-    try:
-        response = await client.aio.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=1000,
-                temperature=0.7,
-            ),
-        )
-        if response.text:
-            return response.text
-        return "AI không trả về nội dung văn bản."
-    except Exception as e:
-        return f"Lỗi chi tiết từ Google: {e}"
+    # Dùng alias chuẩn tự động trỏ đến phiên bản Flash khả dụng mới nhất
+    models_to_try = ["gemini-flash-latest", "gemini-3.8-flash"]
+    config = types.GenerateContentConfig(
+        max_output_tokens=800,
+        temperature=0.7,
+    )
+
+    last_error = ""
+    for model_name in models_to_try:
+        try:
+            response = await client.aio.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=config,
+            )
+            if response.text:
+                return response.text
+        except Exception as e:
+            last_error = repr(e)
+            continue
+
+    return f"Google từ chối phản hồi: {last_error}"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot AI trên Cloud đã sẵn sàng hoạt động!")
+    await update.message.reply_text("Bot AI đã sẵn sàng hoạt động!")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     chat_id = update.effective_chat.id
+
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     try:
-        reply_content = await asyncio.wait_for(call_gemini(user_text), timeout=25.0)
+        reply_content = await asyncio.wait_for(call_gemini(user_text), timeout=30.0)
         await update.message.reply_text(reply_content)
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Hết thời gian chờ phản hồi (30s).")
     except Exception as e:
-        await update.message.reply_text(f"Lỗi: {e}")
+        err_msg = repr(e) if not str(e) else str(e)
+        await update.message.reply_text(f"Lỗi: {err_msg}")
 
 
-# Tạo trang web giả lập để Render nhận diện Web Service Free
 async def handle_ping(request):
-    return web.Response(text="Bot is running perfectly 24/7!")
+    return web.Response(text="Bot is live!")
 
 
 async def run_dummy_server():
@@ -78,10 +88,8 @@ async def run_dummy_server():
 
 
 async def main():
-    # Chạy máy chủ web mini
     await run_dummy_server()
 
-    # Khởi động Telegram Bot
     telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -90,7 +98,6 @@ async def main():
     await telegram_app.start()
     await telegram_app.updater.start_polling(drop_pending_updates=True)
 
-    # Giữ tiến trình chạy liên tục
     while True:
         await asyncio.sleep(3600)
 
