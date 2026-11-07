@@ -26,74 +26,59 @@ if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
     raise ValueError("Thiếu biến môi trường TELEGRAM_BOT_TOKEN hoặc GEMINI_API_KEY!")
 
 async def call_gemini(prompt: str) -> str:
-    api_key = GEMINI_API_KEY
+    # Ưu tiên dòng 3.1 và 3.0 flash (chính là model vừa chạy thành công)
+    models_to_try = [
+        "gemini-3.1-flash",
+        "gemini-3-flash-preview"
+    ]
+    
     base_url = "https://generativelanguage.googleapis.com/v1beta"
     headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": 800, "temperature": 0.7}
+    }
 
     try:
         async with aiohttp.ClientSession() as session:
-            # BƯỚC 1: LẤY TOÀN BỘ DANH SÁCH MODEL KHẢ DỤNG
-            list_url = f"{base_url}/models?key={api_key}"
-            async with session.get(list_url, timeout=10) as list_resp:
-                if list_resp.status != 200:
-                    return f"Lỗi xác thực Key: {await list_resp.text()}"
-
-                data = await list_resp.json()
-                valid_models = [
-                    m['name'] for m in data.get('models', [])
-                    if 'generateContent' in m.get('supportedGenerationMethods', [])
-                ]
-
-                if not valid_models:
-                    return "Tài khoản Google của bạn không có quyền dùng bất kỳ model AI nào."
-
-            # Sắp xếp ưu tiên các model 'flash' lên đầu vì chúng thường miễn phí và nhanh
-            valid_models.sort(key=lambda x: ('flash' not in x, x))
-
-            error_logs = []
-            # BƯỚC 2: THỬ LẦN LƯỢT TỪNG MODEL CHO ĐẾN KHI THÀNH CÔNG
-            for chosen_model in valid_models:
-                gen_url = f"{base_url}/{chosen_model}:generateContent?key={api_key}"
-                payload = {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"maxOutputTokens": 800, "temperature": 0.7}
-                }
-
+            for chosen_model in models_to_try:
+                gen_url = f"{base_url}/models/{chosen_model}:generateContent?key={GEMINI_API_KEY}"
+                
                 async with session.post(gen_url, headers=headers, json=payload, timeout=20) as gen_resp:
                     if gen_resp.status == 200:
                         gen_data = await gen_resp.json()
                         try:
-                            text = gen_data['candidates'][0]['content']['parts'][0]['text']
-                            model_short = chosen_model.replace("models/", "")
-                            return f"[Đã kết nối thành công: {model_short}]\n\n{text}"
+                            # Lấy nội dung trả lời (không chèn thêm các dòng chữ báo cáo kỹ thuật)
+                            return gen_data['candidates'][0]['content']['parts'][0]['text']
                         except (KeyError, IndexError):
-                            continue # Lỗi dữ liệu trống, thử model khác
-                    else:
-                        # Bị dính limit: 0 (429), 404, hoặc 503 -> Ghi nhận và đi tiếp sang model khác
-                        error_logs.append(f"{chosen_model.replace('models/', '')}: {gen_resp.status}")
+                            continue # Thử model dự phòng nếu dữ liệu trống
+                    elif gen_resp.status in [429, 503]:
+                        # Nếu model chính bận/hết hạn mức, nghỉ 1s rồi chuyển sang model dự phòng
+                        await asyncio.sleep(1.0)
                         continue
 
-            return f"Toàn bộ model đều bị Google chặn Free Tier. Bị chặn tại: {', '.join(error_logs)}"
-
-    except Exception as e:
-        return f"Lỗi kết nối mạng: {str(e)}"
+            return "Máy chủ AI hiện đang bận, bạn vui lòng gửi lại sau vài giây nhé!"
+            
+    except Exception:
+        return "Xin lỗi, kết nối mạng đang gián đoạn. Bạn thử lại nhé!"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot AI đã sẵn sàng hoạt động bằng cơ chế dò model tự động!")
+    await update.message.reply_text("Chào bạn! Tôi là trợ lý AI (Gemini 3.1). Tôi có thể giúp gì cho bạn hôm nay?")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     chat_id = update.effective_chat.id
 
+    # Hiện trạng thái "Bot đang gõ..."
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     try:
-        reply_content = await asyncio.wait_for(call_gemini(user_text), timeout=35.0)
+        reply_content = await asyncio.wait_for(call_gemini(user_text), timeout=30.0)
         await update.message.reply_text(reply_content)
     except asyncio.TimeoutError:
-        await update.message.reply_text("Máy chủ phản hồi chậm (hơn 35s). Bạn gửi lại nhé!")
-    except Exception as e:
-        await update.message.reply_text(f"Lỗi hệ thống: {str(e)}")
+        await update.message.reply_text("Hệ thống xử lý hơi lâu. Bạn vui lòng gửi lại câu hỏi nhé!")
+    except Exception:
+        await update.message.reply_text("Rất tiếc, đã có lỗi nhỏ xảy ra. Hãy thử lại!")
 
 async def handle_ping(request):
     return web.Response(text="Bot is live!")
