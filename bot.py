@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import aiohttp
 from aiohttp import web
 from telegram import Update
 from telegram.constants import ChatAction
@@ -11,8 +12,6 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from google import genai
-from google.genai import types
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -26,41 +25,43 @@ PORT = int(os.getenv("PORT", 8080))
 if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
     raise ValueError("Thiếu biến môi trường TELEGRAM_BOT_TOKEN hoặc GEMINI_API_KEY!")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-
-
 async def call_gemini(prompt: str) -> str:
-    # Dùng chính xác model Google yêu cầu và alias tự động của hệ thống
-    models_to_try = [
-        "gemini-3.8-flash",
-        "gemini-flash"
-    ]
-    config = types.GenerateContentConfig(
-        max_output_tokens=800,
-        temperature=0.7,
-    )
+    # Gọi trực tiếp REST API chuẩn v1beta, bỏ qua thư viện SDK bị lỗi của Google
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "maxOutputTokens": 800,
+            "temperature": 0.7
+        }
+    }
 
-    error_logs = []
-    for model_name in models_to_try:
+    # Cơ chế tự động thử lại 3 lần nếu dính lỗi 503 (quá tải cục bộ)
+    for attempt in range(3):
         try:
-            response = await client.aio.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=config,
-            )
-            if response.text:
-                return response.text
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload, timeout=20) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        try:
+                            return data['candidates'][0]['content']['parts'][0]['text']
+                        except (KeyError, IndexError):
+                            return "AI trả về dữ liệu trống."
+                    elif response.status in [503, 429]: 
+                        # Nếu máy chủ bận, nghỉ 2 giây rồi gọi lại
+                        await asyncio.sleep(2.0)
+                        continue
+                    else:
+                        error_data = await response.text()
+                        return f"Lỗi máy chủ Google (Mã {response.status}): {error_data}"
         except Exception as e:
-            error_msg = str(e).replace('\n', ' ').strip()
-            error_logs.append(f"- {model_name}: {error_msg[:100]}...")
-            await asyncio.sleep(1.5)
-            continue
-
-    return "Máy chủ từ chối. Báo cáo chi tiết:\n" + "\n".join(error_logs)
+            return f"Lỗi kết nối mạng: {str(e)}"
+    
+    return "Máy chủ Google hiện đang quá tải sau nhiều lần thử nghiệm. Vui lòng nhắn lại sau 1-2 phút nhé!"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot AI đã sẵn sàng hoạt động!")
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
@@ -74,13 +75,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except asyncio.TimeoutError:
         await update.message.reply_text("Hết thời gian chờ phản hồi (35s). Bạn hãy gửi lại nhé!")
     except Exception as e:
-        err_msg = repr(e) if not str(e) else str(e)
-        await update.message.reply_text(f"Lỗi: {err_msg}")
-
+        await update.message.reply_text(f"Lỗi hệ thống: {str(e)}")
 
 async def handle_ping(request):
     return web.Response(text="Bot is live!")
-
 
 async def run_dummy_server():
     app = web.Application()
@@ -89,7 +87,6 @@ async def run_dummy_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-
 
 async def main():
     await run_dummy_server()
@@ -104,7 +101,6 @@ async def main():
 
     while True:
         await asyncio.sleep(3600)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
