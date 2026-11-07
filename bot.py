@@ -30,8 +30,13 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 async def call_gemini(prompt: str) -> str:
-    # Dùng alias chuẩn tự động trỏ đến phiên bản Flash khả dụng mới nhất
-    models_to_try = ["gemini-flash-latest", "gemini-3.8-flash"]
+    # Luân chuyển giữa các cụm máy chủ khác nhau: Pro (ổn định) và Flash
+    models_to_try = [
+        "gemini-2.5-pro",
+        "gemini-1.5-pro",
+        "gemini-flash-latest",
+        "gemini-3.8-flash",
+    ]
     config = types.GenerateContentConfig(
         max_output_tokens=800,
         temperature=0.7,
@@ -49,6 +54,8 @@ async def call_gemini(prompt: str) -> str:
                 return response.text
         except Exception as e:
             last_error = repr(e)
+            # Nếu cụm model này quá tải (503) hoặc hết hạn ngạch (429), chờ nhẹ 1s rồi sang cụm khác
+            await asyncio.sleep(1.0)
             continue
 
     return f"Google từ chối phản hồi: {last_error}"
@@ -65,10 +72,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     try:
-        reply_content = await asyncio.wait_for(call_gemini(user_text), timeout=30.0)
+        reply_content = await asyncio.wait_for(call_gemini(user_text), timeout=35.0)
         await update.message.reply_text(reply_content)
     except asyncio.TimeoutError:
-        await update.message.reply_text("Hết thời gian chờ phản hồi (30s).")
+        await update.message.reply_text("Hết thời gian chờ phản hồi (35s). Bạn hãy gửi lại nhé!")
     except Exception as e:
         err_msg = repr(e) if not str(e) else str(e)
         await update.message.reply_text(f"Lỗi: {err_msg}")
