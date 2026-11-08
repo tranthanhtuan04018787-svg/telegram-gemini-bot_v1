@@ -67,7 +67,7 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
 
     # Giữ nguyên model 3.1 theo cấu trúc hệ thống của bạn
     models_to_try = ["gemini-1.5-flash"]
-    base_url = "https://generativelanguage.googleapis.com/v1beta"
+    base_url = "https://generativelanguage.googleapis.com/v1"
     headers = {'Content-Type': 'application/json'}
     
     now = datetime.utcnow() + timedelta(hours=7)
