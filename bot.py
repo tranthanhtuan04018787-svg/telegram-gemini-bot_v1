@@ -1,5 +1,4 @@
 import os
-import time
 import asyncio
 import logging
 import aiohttp
@@ -19,7 +18,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-# Ẩn log httpx để không bị lộ TELEGRAM_BOT_TOKEN trên màn hình Render
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -34,10 +32,18 @@ if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
 user_histories = {}
 MAX_HISTORY = 4
 
-# Bộ nhớ đệm lưu danh sách model khả dụng của API Key
-cached_models = []
-last_model_fetch = 0
-active_model_name = "Đang tự động dò tìm..."
+# Phiên kết nối toàn cục (Giúp giữ kết nối luôn mở, giảm 1s độ trễ mỗi tin nhắn)
+http_session: aiohttp.ClientSession = None
+
+# Ghim sẵn các model thực tế từ tài khoản của bạn để chạy ngay lập tức (0 giây dò tìm)
+cached_models = [
+    "models/gemini-3.1-flash-lite",
+    "models/gemini-3.1-flash-lite-preview",
+    "models/gemini-3.8-flash",
+    "models/gemini-3.5-flash",
+    "models/gemini-2.5-flash",
+]
+active_model_name = cached_models[0]
 
 SYSTEM_PROMPT = """
 Bạn là trợ lý ảo cá nhân của anh Tuấn. 
@@ -51,61 +57,58 @@ def get_vn_time() -> str:
     now = datetime.now(timezone.utc) + timedelta(hours=7)
     return now.strftime("%d/%m/%Y %H:%M:%S")
 
+async def get_http_session() -> aiohttp.ClientSession:
+    """Lấy phiên kết nối dùng chung, tự khởi tạo nếu chưa có."""
+    global http_session
+    if http_session is None or http_session.closed:
+        connector = aiohttp.TCPConnector(limit=50, keepalive_timeout=60)
+        http_session = aiohttp.ClientSession(connector=connector)
+    return http_session
+
 def score_model(model_id: str) -> tuple:
-    """Chấm điểm ưu tiên: 3.1-flash -> các dòng flash mới nhất -> các dòng pro."""
+    """Ưu tiên: 3.1-flash bản chính thức -> bản preview -> các dòng flash mới nhất."""
     m = model_id.lower()
     is_3_1_flash = 1 if ("3.1" in m and "flash" in m) else 0
+    not_preview = 0 if ("preview" in m or "exp" in m) else 1
     is_flash = 1 if "flash" in m else 0
     not_lite = 0 if ("lite" in m or "8b" in m) else 1
 
     ver_score = 0
-    for idx, ver in enumerate(["1.5", "2.0", "2.5", "3.0", "3.1", "3.5", "3.8"]):
+    for idx, ver in enumerate(["1.5", "2.0", "2.5", "3.0", "3.1", "3.5", "3.6", "3.7", "3.8"]):
         if ver in m:
             ver_score = idx + 1
 
-    return (is_3_1_flash, is_flash, ver_score, not_lite)
+    return (is_3_1_flash, not_preview, is_flash, ver_score, not_lite)
 
-async def get_available_models(session: aiohttp.ClientSession) -> list:
-    """Gọi trực tiếp ListModels của Google để lấy đúng tên model mà API Key hỗ trợ."""
-    global cached_models, last_model_fetch
-    if cached_models and (time.time() - last_model_fetch < 3600):
-        return cached_models
-
+async def refresh_models_from_google() -> list:
+    """Cập nhật danh sách model từ Google (Chỉ chạy ngầm khi khởi động hoặc khi bị lỗi 404)."""
+    global cached_models, active_model_name
+    session = await get_http_session()
     list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
     try:
-        async with session.get(list_url, timeout=15) as resp:
+        async with session.get(list_url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 valid_models = []
-                excluded_keywords = [
+                excluded = [
                     "tts", "image", "imagen", "veo", "embedding",
-                    "aqa", "audio", "robotics", "computer-use", "learnlm"
+                    "aqa", "audio", "robotics", "computer-use", "learnlm", "transcribe"
                 ]
                 for item in data.get("models", []):
-                    name = item.get("name", "") # Dạng: models/gemini-...
+                    name = item.get("name", "")
                     methods = item.get("supportedGenerationMethods", [])
                     if "generateContent" in methods and "gemini" in name.lower():
-                        if not any(kw in name.lower() for kw in excluded_keywords):
+                        if not any(kw in name.lower() for kw in excluded):
                             valid_models.append(name)
 
                 if valid_models:
                     valid_models.sort(key=score_model, reverse=True)
                     cached_models = valid_models
-                    last_model_fetch = time.time()
-                    logging.info(f"Danh sách model khả dụng: {cached_models}")
-                    return cached_models
-            else:
-                err = await resp.text()
-                logging.error(f"Lỗi khi gọi ListModels ({resp.status}): {err}")
+                    active_model_name = cached_models[0]
+                    logging.info(f"Đã đồng bộ model ưu tiên số 1: {active_model_name}")
     except Exception as e:
-        logging.error(f"Lỗi kết nối ListModels: {e}")
-
-    # Danh sách dự phòng nếu mạng chập chờn không gọi được ListModels
-    return [
-        "models/gemini-2.5-flash",
-        "models/gemini-2.0-flash",
-        "models/gemini-1.5-flash-latest",
-    ]
+        logging.error(f"Lỗi đồng bộ ListModels: {e}")
+    return cached_models
 
 async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply: str):
     if not SHEET_WEBHOOK_URL:
@@ -118,14 +121,14 @@ async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply
         "bot_reply": bot_reply,
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(SHEET_WEBHOOK_URL, json=payload, timeout=15) as resp:
-                await resp.text()
+        session = await get_http_session()
+        async with session.post(SHEET_WEBHOOK_URL, json=payload, timeout=15) as resp:
+            await resp.text()
     except Exception as e:
         logging.error(f"Lỗi ghi Google Sheet: {e}")
 
 async def call_gemini(chat_id: str, user_text: str) -> str:
-    global active_model_name
+    global active_model_name, cached_models
     if chat_id not in user_histories:
         user_histories[chat_id] = []
 
@@ -143,40 +146,43 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
     payload = {
         "systemInstruction": {"parts": [{"text": dynamic_system_prompt}]},
         "contents": user_histories[chat_id],
-        "generationConfig": {"maxOutputTokens": 800, "temperature": 0.7},
+        "generationConfig": {"maxOutputTokens": 600, "temperature": 0.7},
     }
 
     try:
-        async with aiohttp.ClientSession() as session:
-            models_to_try = await get_available_models(session)
-            last_error = ""
+        session = await get_http_session()
+        last_error = ""
 
-            for chosen_model in models_to_try:
-                # Đảm bảo định dạng chuẩn models/ten-model
-                model_path = chosen_model if chosen_model.startswith("models/") else f"models/{chosen_model}"
-                gen_url = f"{base_url}/{model_path}:generateContent?key={GEMINI_API_KEY}"
+        for idx, chosen_model in enumerate(list(cached_models)):
+            model_path = chosen_model if chosen_model.startswith("models/") else f"models/{chosen_model}"
+            gen_url = f"{base_url}/{model_path}:generateContent?key={GEMINI_API_KEY}"
 
-                async with session.post(gen_url, headers=headers, json=payload, timeout=45) as gen_resp:
-                    if gen_resp.status == 200:
-                        gen_data = await gen_resp.json()
-                        try:
-                            bot_reply = gen_data["candidates"][0]["content"]["parts"][0]["text"]
-                            user_histories[chat_id].append({"role": "model", "parts": [{"text": bot_reply}]})
-                            active_model_name = model_path
-                            return bot_reply
-                        except (KeyError, IndexError):
-                            continue
-                    elif gen_resp.status in [429, 503]:
-                        # Quá tải hoặc hết quota ở model này -> tự thử model tiếp theo
-                        await asyncio.sleep(0.5)
+            async with session.post(gen_url, headers=headers, json=payload, timeout=30) as gen_resp:
+                if gen_resp.status == 200:
+                    gen_data = await gen_resp.json()
+                    try:
+                        bot_reply = gen_data["candidates"][0]["content"]["parts"][0]["text"]
+                        user_histories[chat_id].append({"role": "model", "parts": [{"text": bot_reply}]})
+                        active_model_name = model_path
+                        # Đưa model vừa chạy thành công lên vị trí đầu tiên để tin nhắn sau không phải dò lại
+                        if idx > 0 and chosen_model in cached_models:
+                            cached_models.remove(chosen_model)
+                            cached_models.insert(0, chosen_model)
+                        return bot_reply
+                    except (KeyError, IndexError):
                         continue
-                    else:
-                        last_error = f"Mã {gen_resp.status} ({model_path}): {await gen_resp.text()}"
-                        logging.warning(f"Bỏ qua model {model_path} do lỗi: {last_error[:200]}")
-                        continue
+                elif gen_resp.status == 404:
+                    # Nếu tương lai model này bị Google xóa -> Tự gọi cập nhật ngầm và chuyển sang model kế tiếp
+                    asyncio.create_task(refresh_models_from_google())
+                    continue
+                elif gen_resp.status in [429, 503]:
+                    continue
+                else:
+                    last_error = f"Mã {gen_resp.status} ({model_path}): {await gen_resp.text()}"
+                    continue
 
-            user_histories[chat_id].pop()
-            return f"⚠️ Không thể kết nối AI. Chi tiết lỗi cuối: {last_error[:300]}"
+        user_histories[chat_id].pop()
+        return f"⚠️ Không thể kết nối AI. Chi tiết: {last_error[:300]}"
 
     except Exception as e:
         user_histories[chat_id].pop()
@@ -188,13 +194,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Xin chào! Mình là trợ lý của anh Tuấn. Mình có thể giúp gì cho bạn?")
 
 async def check_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lệnh /model giúp kiểm tra danh sách model thực tế mà API Key đang sở hữu."""
-    async with aiohttp.ClientSession() as session:
-        models = await get_available_models(session)
-    top_models = "\n".join([f"• `{m}`" for m in models[:8]])
+    top_models = "\n".join([f"• `{m}`" for m in cached_models[:6]])
     msg = (
-        f"🤖 **Model đang dùng:** `{active_model_name}`\n\n"
-        f"📋 **Top model khả dụng trong API Key của bạn:**\n{top_models}"
+        f"⚡ **Model đang chạy cố định:** `{active_model_name}`\n\n"
+        f"📋 **Danh sách dự phòng tức thì:**\n{top_models}"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -203,16 +206,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
     sender_name = update.message.from_user.full_name
 
+    # Chạy song song việc báo cáo cho Admin và việc gõ chữ để không làm trễ phản hồi
     if ADMIN_CHAT_ID and chat_id != ADMIN_CHAT_ID:
-        try:
-            report_msg = f"🔔 **Có tin nhắn mới tới Bot!**\n👤 Từ: {sender_name}\n💬 Nội dung: {user_text}"
-            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_msg)
-        except Exception as e:
-            logging.error(f"Lỗi gửi báo cáo: {e}")
+        report_msg = f"🔔 **Có tin nhắn mới tới Bot!**\n👤 Từ: {sender_name}\n💬 Nội dung: {user_text}"
+        asyncio.create_task(context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_msg))
 
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    asyncio.create_task(context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING))
+
     try:
-        reply_content = await asyncio.wait_for(call_gemini(chat_id, user_text), timeout=60.0)
+        reply_content = await asyncio.wait_for(call_gemini(chat_id, user_text), timeout=45.0)
         await update.message.reply_text(reply_content)
         asyncio.create_task(log_to_sheet(chat_id, sender_name, user_text, reply_content))
     except asyncio.TimeoutError:
@@ -233,6 +235,8 @@ async def run_dummy_server():
 
 async def main():
     await run_dummy_server()
+    # Khởi tạo sẵn kết nối và đồng bộ danh sách model ngay lúc bật máy chủ (trước khi khách chat)
+    await refresh_models_from_google()
 
     telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
