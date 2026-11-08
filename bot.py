@@ -41,8 +41,7 @@ Tuyệt đối không nhận mình là AI do Google tạo ra.
 
 async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply: str):
     if not SHEET_WEBHOOK_URL:
-        return "❌ TRỐNG LINK: Render chưa có biến SHEET_WEBHOOK_URL"
-    
+        return
     now = datetime.utcnow() + timedelta(hours=7)
     payload = {
         "time": now.strftime("%d/%m/%Y %H:%M:%S"),
@@ -53,14 +52,9 @@ async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(SHEET_WEBHOOK_URL, json=payload, timeout=15) as resp:
-                resp_text = await resp.text()
-                if resp.status in [200, 201, 302]:
-                    return f"✅ Phản hồi từ Google: {resp_text}"
-                else:
-                    return f"❌ Lỗi HTTP {resp.status}: {resp_text[:100]}"
+            await session.post(SHEET_WEBHOOK_URL, json=payload, timeout=10)
     except Exception as e:
-        return f"❌ Lỗi kết nối mạng từ Render: {str(e)}"
+        logging.error(f"Lỗi ghi log: {e}")
 
 async def call_gemini(chat_id: str, user_text: str) -> str:
     if chat_id not in user_histories:
@@ -71,8 +65,8 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
     if len(user_histories[chat_id]) > MAX_HISTORY:
         user_histories[chat_id] = user_histories[chat_id][-MAX_HISTORY:]
 
-    # Khóa cố định sử dụng model 3.1 flash theo đúng thỏa thuận
-    models_to_try = ["gemini-3.1-flash"]
+    # Giữ nguyên model 3.1 theo cấu trúc hệ thống của bạn
+    models_to_try = ["gemini-3.1-flash", "gemini-3-flash-preview"]
     base_url = "https://generativelanguage.googleapis.com/v1beta"
     headers = {'Content-Type': 'application/json'}
     
@@ -101,23 +95,26 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
                             user_histories[chat_id].append({"role": "model", "parts": [{"text": bot_reply}]})
                             return bot_reply
                         except (KeyError, IndexError):
-                            return f"⚠️ Lỗi trích xuất dữ liệu: {gen_data}"
+                            # ĐIỂM MÙ 1: Bị chặn nội dung an toàn
+                            logging.error(f"⚠️ LỖI FORMAT HOẶC SAFETY FILTER TỪ GOOGLE: {gen_data}")
+                            continue 
                     elif gen_resp.status in [429, 503]:
+                        # ĐIỂM MÙ 2: Bị chặn do quá tải/hết Quota
+                        logging.warning(f"⚠️ QUÁ TẢI API (Mã {gen_resp.status}) ở model {chosen_model}")
                         await asyncio.sleep(1.0)
                         continue
                     else:
                         error_text = await gen_resp.text()
-                        if chosen_model == models_to_try[-1]:
-                            user_histories[chat_id].pop()
-                            return f"⚠️ LỖI GOOGLE API (Mã {gen_resp.status}):\n{error_text[:500]}"
-                        continue
+                        logging.error(f"❌ LỖI TỪ GOOGLE (Mã {gen_resp.status}): {error_text}")
+                        break
 
             user_histories[chat_id].pop()
-            return "Máy chủ AI hiện đang bận (Đã thử hết các model nhưng không phản hồi)."
+            return "Máy chủ AI hiện đang bận, bạn vui lòng gửi lại sau vài giây nhé!"
             
     except Exception as e:
         user_histories[chat_id].pop()
-        return f"❌ LỖI HỆ THỐNG/MẠNG:\n{str(e)}"
+        logging.error(f"Lỗi mạng/code: {e}")
+        return "Xin lỗi, kết nối mạng đang gián đoạn. Bạn thử lại nhé!"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
@@ -144,9 +141,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(log_to_sheet(chat_id, sender_name, user_text, reply_content))
         
     except asyncio.TimeoutError:
-        await update.message.reply_text("⏳ Quá thời gian chờ (Timeout). Kết nối quá chậm.")
-    except Exception as e:
-        await update.message.reply_text(f"Rất tiếc, đã có lỗi xảy ra: {str(e)}")
+        await update.message.reply_text("Mình đang xử lý hơi lâu. Bạn vui lòng gửi lại nhé!")
+    except Exception:
+        await update.message.reply_text("Rất tiếc, đã có lỗi nhỏ xảy ra. Hãy thử lại!")
 
 async def handle_ping(request):
     return web.Response(text="Bot is live!")
