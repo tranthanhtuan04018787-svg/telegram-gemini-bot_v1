@@ -66,7 +66,7 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
         user_histories[chat_id] = user_histories[chat_id][-MAX_HISTORY:]
 
     # Giữ nguyên model 3.1 theo cấu trúc hệ thống của bạn
-    models_to_try = ["gemini-1.5-flash"]
+    models_to_try = ["gemini-3.1-flash"]
     base_url = "https://generativelanguage.googleapis.com/v1"
     headers = {'Content-Type': 'application/json'}
     
