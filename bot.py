@@ -126,20 +126,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
     sender_name = update.message.from_user.full_name
 
-    # --- LỆNH CHẨN ĐOÁN LỖI WEBHOOK ---
-    if user_text.strip().lower() == "kiểm tra sheet":
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        sheet_status = await log_to_sheet(chat_id, sender_name, "Lệnh test", "Đang thử nghiệm kết nối")
-        url_preview = SHEET_WEBHOOK_URL[:45] + "..." if SHEET_WEBHOOK_URL else "ĐANG TRỐNG (Chưa cài link)"
-        
-        await update.message.reply_text(
-            f"🛠 **BÁO CÁO KẾT NỐI TỚI GOOGLE SHEETS:**\n\n"
-            f"🔗 **Link đang dùng:**\n{url_preview}\n\n"
-            f"📝 **Tình trạng:**\n{sheet_status}"
-        )
-        return
-    # ----------------------------------
-
     if ADMIN_CHAT_ID and chat_id != ADMIN_CHAT_ID:
         try:
             report_msg = f"🔔 **Có tin nhắn mới tới Bot!**\n👤 Từ: {sender_name}\n💬 Nội dung: {user_text}"
