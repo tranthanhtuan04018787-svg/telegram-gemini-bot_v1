@@ -446,17 +446,19 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 await update.message.reply_text(distribution_msg, parse_mode="Markdown")
             
-            # --- BỔ SUNG BẮT LỖI 503 RÕ RÀNG HƠN ---
+            # --- XỬ LÝ LỖI 503 Ở ĐÂY ---
             elif resp.status == 503:
-                CURRENT_MODEL = None # Reset model để tự chọn lại
-                await update.message.reply_text("⚠️ **Lỗi 503 (Quá tải):** Máy chủ Gemini hiện đang quá tải hoặc bảo trì. Quá trình report đã bị hủy để tránh mất dữ liệu. Bạn hãy đợi vài phút và gọi lại lệnh `/report` nhé.", parse_mode="Markdown")
+                CURRENT_MODEL = None  # Reset model
+                await update.message.reply_text(
+                    "⚠️ **Lỗi 503 (Quá tải):** Máy chủ Gemini hiện đang quá tải hoặc bảo trì. Quá trình report đã bị hủy để tránh mất dữ liệu. Bạn hãy đợi vài phút và gọi lại lệnh `/report` nhé.",
+                    parse_mode="Markdown"
+                )
             else:
                 err_text = await resp.text()
                 await update.message.reply_text(f"❌ Lỗi từ API Gemini ({resp.status}):\n`{err_text[:200]}`", parse_mode="Markdown")
 
     except Exception as e:
         await update.message.reply_text(f"❌ Đã xảy ra lỗi hệ thống hoặc phân tích JSON: {str(e)}")
-
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
     if chat_id != ADMIN_CHAT_ID: return
