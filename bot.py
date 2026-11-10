@@ -115,24 +115,32 @@ async def get_active_gemini_model() -> str:
                 for m in data.get("models", []):
                     name = m.get("name", "")
                     methods = m.get("supportedGenerationMethods", [])
-                    # Chỉ lấy các model thực sự hỗ trợ generateContent và BẮT BUỘC phải là dòng 1.5-flash ổn định
-                    if "generateContent" in methods and "gemini-1.5-flash" in name and "exp" not in name:
+                    # Chỉ lấy các model hỗ trợ generateContent và loại bỏ các bản thử nghiệm (exp)
+                    if "generateContent" in methods and "exp" not in name:
                         valid_models.append(name)
                 
-                if valid_models:
-                    valid_models.sort(key=len) # Ưu tiên tên ngắn chuẩn xác nhất
+                # Ưu tiên tìm các dòng flash ổn định mới nhất hiện có
+                flash_models = [m for m in valid_models if "flash" in m.lower()]
+                
+                if flash_models:
+                    # Sắp xếp để ưu tiên chọn tên ngắn gọn chuẩn xác nhất
+                    flash_models.sort(key=len)
+                    CURRENT_MODEL = flash_models[0]
+                elif valid_models:
                     CURRENT_MODEL = valid_models[0]
                 else:
-                    # Fallback an toàn tuyệt đối nếu API không trả về
-                    CURRENT_MODEL = "models/gemini-1.5-flash"
+                    CURRENT_MODEL = "models/gemini-2.0-flash" # Dự phòng chuẩn
                 
                 logging.info(f"✅ Đã chọn Model an toàn: {CURRENT_MODEL}")
                 return CURRENT_MODEL
             else:
-                return "models/gemini-1.5-flash"
+                # Nếu API /models lỗi, gán cứng model dự phòng an toàn
+                CURRENT_MODEL = "models/gemini-2.0-flash"
+                return CURRENT_MODEL
     except Exception as e:
-        logging.error(f"Lỗi lấy danh sách model: {e}")
-        return "models/gemini-1.5-flash"
+        logging.error(f"Lỗi khi fetch model: {e}")
+        CURRENT_MODEL = "models/gemini-2.0-flash"
+        return CURRENT_MODEL
 
 # 5. CÁC HÀM XỬ LÝ GITHUB VÀ GOOGLE DRIVE
 async def read_github_file(file_path: str) -> str:
