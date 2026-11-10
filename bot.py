@@ -85,4 +85,4 @@ async def append_to_input_md(entry_text: str) -> tuple[bool, str]:
                 existing_text = "# 📥 Hộp thư đến (INPUT)\n\n"
             else:
                 err_body = await resp.text()
-                return False, f"Lỗi GET INPUT.md ({resp.status
+                return False, f"Lỗi GET INPUT.md ({resp.status}): {err_body[:120]}"
