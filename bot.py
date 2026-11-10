@@ -131,16 +131,18 @@ async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply
 
 async def save_note_to_github(note_content: str) -> tuple[bool, str]:
     """Lưu ghi chú vào kho GitHub Brain-2 cho Obsidian."""
-    if not GITHUB_TOKEN:
+    token = str(GITHUB_TOKEN or "").strip()
+    repo = str(GITHUB_REPO or "").strip()
+
+    if not token:
         return False, "Thiếu biến GITHUB_TOKEN trên Render!"
-    if not GITHUB_REPO:
+    if not repo:
         return False, "Thiếu biến GITHUB_REPO trên Render!"
 
     session = await get_http_session()
     file_path = "Inbox.md"
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
+    url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
     
-   # Sử dụng 'token' thay cho 'Bearer' đối với GitHub Classic Token
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
@@ -153,7 +155,7 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
         sha = None
         existing_text = ""
         
-        # 1. Kiểm tra file cũ trên GitHub
+        # 1. Kiểm tra file cũ trên GitHub (nhánh main)
         async with session.get(f"{url}?ref=main", headers=headers, timeout=15) as resp:
             if resp.status == 200:
                 file_info = await resp.json()
@@ -166,7 +168,7 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
                 err_body = await resp.text()
                 return False, f"Lỗi GET ({resp.status}): {err_body[:180]}"
 
-        # 2. Chuẩn bị nội dung
+        # 2. Gộp nội dung và mã hóa base64
         new_text = existing_text + formatted_entry
         encoded_content = base64.b64encode(new_text.encode("utf-8")).decode("utf-8")
 
@@ -178,7 +180,7 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
         if sha:
             payload["sha"] = sha
 
-        # 3. Ghi đè hoặc tạo mới file
+        # 3. Ghi file lên nhánh main
         async with session.put(url, headers=headers, json=payload, timeout=20) as put_resp:
             if put_resp.status in [200, 201]:
                 return True, "Thành công"
@@ -186,8 +188,7 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
                 err_body = await put_resp.text()
                 return False, f"Lỗi PUT ({put_resp.status}): {err_body[:180]}"
     except Exception as e:
-        return False, f"Ngoại lệ kết nối: {str(e)}"
-
+        return False, f"Ngoại lệ: {str(e)}"
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
     user_histories[chat_id] = []
