@@ -40,6 +40,11 @@ GEMINI_API_BASE = "https" + "://generativelanguage.googleapis.com/v1beta"
 if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
     raise ValueError("Thiếu biến môi trường TELEGRAM_BOT_TOKEN hoặc GEMINI_API_KEY!")
 
+# Gửi API key qua header (không nhét vào URL để khỏi lộ trong log/thông báo lỗi)
+GEMINI_HEADERS = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
+# Tuỳ chọn: ép dùng 1 model cụ thể, ví dụ GEMINI_MODEL=gemini-flash-latest
+GEMINI_MODEL_OVERRIDE = os.getenv("GEMINI_MODEL", "").strip()
+
 # 3. BIẾN TOÀN CỤC & PROMPT
 user_histories = {}
 MAX_HISTORY = 4
@@ -100,56 +105,105 @@ async def get_http_session() -> aiohttp.ClientSession:
         http_session = aiohttp.ClientSession(connector=connector)
     return http_session
 
-async def get_active_gemini_model() -> str:
-    """
-    Thay vì phụ thuộc hoàn toàn vào API /models công cộng hay bị lỗi,
-    hàm này ưu tiên danh sách các model ổn định thực tế, 
-    hoặc tự động quét với bộ lọc cực kỳ an toàn.
-    """
+# Các model KHÔNG dùng để chat văn bản
+MODEL_EXCLUDE = ("exp", "tts", "image", "live", "audio", "embedding", "robotics",
+                 "omni", "imagen", "veo", "lyria", "thinking", "computer-use", "customtools")
+BAD_MODELS = set()  # model đã bị 404 -> không chọn lại nữa
+FALLBACK_MODELS = ["models/gemini-flash-latest"]  # alias luôn trỏ tới flash mới nhất
+
+def _norm_model(name: str) -> str:
+    return name if name.startswith("models/") else f"models/{name}"
+
+def _model_rank(name: str):
+    n = name.lower()
+    m = re.search(r"gemini-(\d+(?:\.\d+)?)-flash", n)
+    version = tuple(int(x) for x in m.group(1).split(".")) if m else (0,)
+    # Ưu tiên: bản ổn định > preview, không lite > lite, version cao nhất, tên ngắn
+    return ("preview" not in n, "lite" not in n, version, -len(n))
+
+async def list_gemini_models() -> list:
+    session = await get_http_session()
+    names, token = [], None
+    for _ in range(10):  # phân trang (mặc định API chỉ trả 50 model/trang)
+        url = f"{GEMINI_API_BASE}/models?pageSize=1000"
+        if token: url += f"&pageToken={token}"
+        async with session.get(url, headers=GEMINI_HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                logging.error(f"List models lỗi {resp.status}: {(await resp.text())[:200]}")
+                break
+            data = await resp.json()
+        for m in data.get("models", []):
+            name = m.get("name", "")
+            if ("generateContent" in m.get("supportedGenerationMethods", [])
+                    and name.startswith("models/gemini-")
+                    and not any(x in name for x in MODEL_EXCLUDE)):
+                names.append(name)
+        token = data.get("nextPageToken")
+        if not token: break
+    return names
+
+async def get_active_gemini_model():
+    """Trả về tên model dùng được, hoặc None nếu mọi lựa chọn đều đã bị 404."""
     global CURRENT_MODEL
-    if CURRENT_MODEL:
+    if GEMINI_MODEL_OVERRIDE and _norm_model(GEMINI_MODEL_OVERRIDE) not in BAD_MODELS:
+        return _norm_model(GEMINI_MODEL_OVERRIDE)
+    if CURRENT_MODEL and CURRENT_MODEL not in BAD_MODELS:
         return CURRENT_MODEL
 
-    # Danh sách các model dự phòng theo thứ tự ưu tiên (ưu tiên dòng 2.0 và 1.5 mới nhất)
-    fallback_models = [
-        "models/gemini-2.0-flash",
-        "models/gemini-1.5-flash-latest",
-        "models/gemini-1.5-flash",
-        "models/gemini-1.5-pro"
-    ]
-
-    url = f"{GEMINI_API_BASE}/models?key={GEMINI_API_KEY}"
     try:
-        session = await get_http_session()
-        async with session.get(url, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                valid_models = []
-                for m in data.get("models", []):
-                    name = m.get("name", "")
-                    methods = m.get("supportedGenerationMethods", [])
-                    if "generateContent" in methods and "exp" not in name and "vision" not in name:
-                        valid_models.append(name)
-                
-                # Tìm xem có model flash nào trong danh sách trả về khớp với danh sách ưu tiên không
-                for preferred in fallback_models:
-                    if preferred in valid_models:
-                        CURRENT_MODEL = preferred
-                        logging.info(f"✅ Chọn model từ whitelist API: {CURRENT_MODEL}")
-                        return CURRENT_MODEL
-                
-                # Nếu không khớp, lấy bất kỳ model flash nào hợp lệ
-                flash_models = [m for m in valid_models if "flash" in m.lower()]
-                if flash_models:
-                    flash_models.sort(key=len)
-                    CURRENT_MODEL = flash_models[0]
-                    return CURRENT_MODEL
+        names = [n for n in await list_gemini_models() if n not in BAD_MODELS]
+        flash = [n for n in names if "flash" in n.lower()]
+        pool = flash or names
+        if pool:
+            CURRENT_MODEL = max(pool, key=_model_rank)
+            logging.info(f"✅ Đã chọn model: {CURRENT_MODEL}")
+            return CURRENT_MODEL
     except Exception as e:
-        logging.warning(f"Không thể fetch danh sách model từ API: {e}")
+        logging.error(f"Lỗi khi fetch model: {type(e).__name__}: {e}")
 
-    # Nếu quét lỗi hoặc không tìm thấy, ép dùng mặc định dòng ổn định nhất
-    CURRENT_MODEL = "models/gemini-2.0-flash"
-    return CURRENT_MODEL
+    for fb in FALLBACK_MODELS:  # không cache, lần sau vẫn thử liệt kê lại
+        if fb not in BAD_MODELS:
+            logging.warning(f"Dùng model dự phòng: {fb}")
+            return fb
+    return None
+
+async def gemini_generate(payload: dict, timeout: int = 30, max_attempts: int = 3):
+    """Gọi generateContent. Tự đổi model khi 404, tự retry khi 429/500/503.
+    Trả về (status, data_json_hoac_None, err_text)."""
+    global CURRENT_MODEL
+    session = await get_http_session()
+    last = (404, None, "Không tìm được model Gemini khả dụng.")
+    for attempt in range(max_attempts):
+        model = await get_active_gemini_model()
+        if not model:
+            return last
+        url = f"{GEMINI_API_BASE}/{model}:generateContent"
+        async with session.post(url, headers=GEMINI_HEADERS, json=payload,
+                                timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            if resp.status == 200:
+                return 200, await resp.json(), ""
+            err = await resp.text()
+            last = (resp.status, None, err)
+            if resp.status == 404:
+                logging.warning(f"Model {model} trả 404 -> loại khỏi danh sách, chọn model khác")
+                BAD_MODELS.add(model)
+                CURRENT_MODEL = None
+                continue
+            if resp.status in (429, 500, 503):
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            return last
+    return last
+
+def extract_gemini_text(data: dict) -> str:
+    cands = data.get("candidates") or []
+    if not cands:
+        raise ValueError(f"Gemini không trả kết quả (promptFeedback={data.get('promptFeedback')})")
+    parts = (cands[0].get("content") or {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+    if not text:
+        raise ValueError(f"Gemini trả về rỗng (finishReason={cands[0].get('finishReason')})")
+    return text
 
 # 5. CÁC HÀM XỬ LÝ GITHUB VÀ GOOGLE DRIVE
 async def read_github_file(file_path: str) -> str:
@@ -285,43 +339,35 @@ async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply
         logging.error(f"Lỗi ghi Google Sheet: {e}")
 
 async def call_gemini(chat_id: str, user_text: str) -> str:
-    global CURRENT_MODEL
     if chat_id not in user_histories: user_histories[chat_id] = []
     user_histories[chat_id].append({"role": "user", "parts": [{"text": user_text}]})
     if len(user_histories[chat_id]) > MAX_HISTORY: user_histories[chat_id] = user_histories[chat_id][-MAX_HISTORY:]
 
-    model_name = await get_active_gemini_model()
-    url = f"{GEMINI_API_BASE}/{model_name}:generateContent?key={GEMINI_API_KEY}"
-    
-    headers = {"Content-Type": "application/json"}
     dynamic_prompt = SYSTEM_PROMPT + f"\n\n[Thời gian]: {get_vn_time()} (Giờ VN)."
     payload = {
         "systemInstruction": {"parts": [{"text": dynamic_prompt}]},
         "contents": user_histories[chat_id],
-        "generationConfig": {"maxOutputTokens": 600, "temperature": 0.7},
+        # Model dòng 2.5/3.x có "thinking" ăn vào quota token -> 600 dễ bị cắt, trả về rỗng
+        "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.7},
     }
 
     try:
-        session = await get_http_session()
-        async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                bot_reply = data["candidates"][0]["content"]["parts"][0]["text"]
-                user_histories[chat_id].append({"role": "model", "parts": [{"text": bot_reply}]})
-                return bot_reply
-            elif resp.status in [500, 503]:
-                CURRENT_MODEL = None
-                return f"⚠️ AI hiện đang quá tải (Lỗi {resp.status}). Vui lòng thử lại sau ít phút!"
-            elif resp.status == 404:
-                CURRENT_MODEL = None
-                return f"⚠️ Lỗi API: Model {model_name} không tồn tại hoặc bị Google gỡ bỏ. Hệ thống sẽ tự động tìm model khác vào lần tới."
-            else:
-                err = await resp.text()
-                user_histories[chat_id].pop()
-                return f"⚠️ Lỗi AI ({resp.status}): {err[:200]}"
+        status, data, err = await gemini_generate(payload, timeout=20)
+        if status == 200:
+            bot_reply = extract_gemini_text(data)
+            user_histories[chat_id].append({"role": "model", "parts": [{"text": bot_reply}]})
+            return bot_reply
+
+        user_histories[chat_id].pop()  # luôn bỏ tin nhắn lỗi khỏi lịch sử
+        if status in (429, 500, 503):
+            return f"⚠️ AI hiện đang quá tải (Lỗi {status}). Vui lòng thử lại sau ít phút!"
+        if status == 404:
+            return "⚠️ Hiện chưa tìm được model Gemini khả dụng. Mình đã báo anh Tuấn kiểm tra giúp."
+        return f"⚠️ Lỗi AI ({status}): {err[:200]}"
     except Exception as e:
         user_histories[chat_id].pop()
-        return f"❌ Lỗi mạng: {str(e)}"
+        logging.exception("call_gemini lỗi")
+        return f"❌ Lỗi xử lý: {type(e).__name__}"
 
 # 7. CÁC LỆNH (COMMANDS)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -417,73 +463,65 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. Gửi cho Gemini xử lý (Áp dụng systemInstruction chuyên biệt)
     ai_prompt = f"Dưới đây là các ghi chú tôi thu thập được trong {days} ngày qua:\n{notes_text}\n\nHãy phân tích, tóm tắt và phân loại theo đúng định dạng JSON đã quy định."
     
-    model_name = await get_active_gemini_model()
-    url = f"{GEMINI_API_BASE}/{model_name}:generateContent?key={GEMINI_API_KEY}"
-    
     payload = {
         "systemInstruction": {"parts": [{"text": SECOND_BRAIN_SYSTEM_INSTRUCTION}]},
         "contents": [{"role": "user", "parts": [{"text": ai_prompt}]}],
-        "generationConfig": {"temperature": 0.2}
+        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
     }
 
     try:
-        session = await get_http_session()
-        async with session.post(url, json=payload, timeout=45) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                ai_response = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                
-                if ai_response.startswith("```json"): ai_response = ai_response[7:]
-                if ai_response.startswith("```"): ai_response = ai_response[3:]
-                if ai_response.endswith("```"): ai_response = ai_response[:-3]
-
-                parsed_json = json.loads(ai_response.strip())
-                summary = parsed_json.get("summary", "Không có tóm tắt.")
-                categories = parsed_json.get("categories", {})
-
-                # 4. Lưu Báo cáo tổng hợp
-                report_text = f"\n\n## Báo cáo {days} ngày qua (Tạo ngày {get_vn_time()})\n**Tóm tắt:** {summary}\n"
-                save_report_ok = await append_to_github_file("Bao_Cao_Tong_Hop.md", report_text)
-                if not save_report_ok:
-                    await update.message.reply_text("❌ Lỗi: AI đã tổng hợp xong nhưng không thể ghi vào Bao_Cao_Tong_Hop.md trên GitHub (Có thể do xung đột file).")
-                    return # Dừng tiến trình, tránh làm mất dữ liệu
-
-                # 5. Phân phối vào các file mục tiêu
-                distribution_msg = f"✅ **Đã hoàn thành Báo cáo {days} ngày!**\n\n📌 **Tóm tắt:** {summary}\n\n📂 **Phân bổ:**\n"
-                for cat_file, items in categories.items():
-                    if items:
-                        formatted_items = "\n".join([f"- [ ] {item}" for item in items])
-                        save_cat_ok = await append_to_github_file(cat_file, f"\n\n### Từ INPUT_BOT ngày {get_vn_time()}:\n{formatted_items}\n")
-                        if save_cat_ok:
-                            distribution_msg += f"- `{cat_file}`: {len(items)} mục\n"
-                        else:
-                            distribution_msg += f"- ❌ Lỗi lưu `{cat_file}`\n"
-
-                # 6. TỰ ĐỘNG DỌN DẸP / NÉN FILE INPUT_BOT.md
-                new_input_content = header_part + "".join(remaining_text_blocks)
-                save_clean_ok = await overwrite_github_file("INPUT_BOT.md", new_input_content, f"Clean up INPUT_BOT after report: {get_vn_time()}")
-                if save_clean_ok:
-                    distribution_msg += f"\n🧹 *Đã dọn sạch các ghi chú đã xử lý khỏi INPUT_BOT.md!*"
-                else:
-                    distribution_msg += f"\n⚠️ *Lỗi: Không thể xóa ghi chú cũ trong INPUT_BOT.md!*"
-
-                await update.message.reply_text(distribution_msg, parse_mode="Markdown")
+        status, data, err_text = await gemini_generate(payload, timeout=90)
+        if status == 200:
+            ai_response = extract_gemini_text(data)
             
-            elif resp.status in [500, 503]:
-                CURRENT_MODEL = None  # Reset model
-                await update.message.reply_text(
-                    f"⚠️ **Lỗi {resp.status} (Quá tải):** Máy chủ Gemini hiện đang bận. Quá trình report đã bị hủy để tránh mất dữ liệu. Bạn hãy đợi vài phút và gọi lại lệnh `/report` nhé.",
-                    parse_mode="Markdown"
-                )
-            elif resp.status == 404:
-                CURRENT_MODEL = None
-                await update.message.reply_text(
-                    f"⚠️ **Lỗi 404 (Không tìm thấy):** Model {model_name} không tồn tại hoặc đã bị gỡ. Bot sẽ tự động cập nhật model khác vào lần tới.",
-                    parse_mode="Markdown"
-                )
+            if ai_response.startswith("```json"): ai_response = ai_response[7:]
+            if ai_response.startswith("```"): ai_response = ai_response[3:]
+            if ai_response.endswith("```"): ai_response = ai_response[:-3]
+
+            parsed_json = json.loads(ai_response.strip())
+            summary = parsed_json.get("summary", "Không có tóm tắt.")
+            categories = parsed_json.get("categories", {})
+
+            # 4. Lưu Báo cáo tổng hợp
+            report_text = f"\n\n## Báo cáo {days} ngày qua (Tạo ngày {get_vn_time()})\n**Tóm tắt:** {summary}\n"
+            save_report_ok = await append_to_github_file("Bao_Cao_Tong_Hop.md", report_text)
+            if not save_report_ok:
+                await update.message.reply_text("❌ Lỗi: AI đã tổng hợp xong nhưng không thể ghi vào Bao_Cao_Tong_Hop.md trên GitHub (Có thể do xung đột file).")
+                return # Dừng tiến trình, tránh làm mất dữ liệu
+
+            # 5. Phân phối vào các file mục tiêu
+            distribution_msg = f"✅ **Đã hoàn thành Báo cáo {days} ngày!**\n\n📌 **Tóm tắt:** {summary}\n\n📂 **Phân bổ:**\n"
+            for cat_file, items in categories.items():
+                if items:
+                    formatted_items = "\n".join([f"- [ ] {item}" for item in items])
+                    save_cat_ok = await append_to_github_file(cat_file, f"\n\n### Từ INPUT_BOT ngày {get_vn_time()}:\n{formatted_items}\n")
+                    if save_cat_ok:
+                        distribution_msg += f"- `{cat_file}`: {len(items)} mục\n"
+                    else:
+                        distribution_msg += f"- ❌ Lỗi lưu `{cat_file}`\n"
+
+            # 6. TỰ ĐỘNG DỌN DẸP / NÉN FILE INPUT_BOT.md
+            new_input_content = header_part + "".join(remaining_text_blocks)
+            save_clean_ok = await overwrite_github_file("INPUT_BOT.md", new_input_content, f"Clean up INPUT_BOT after report: {get_vn_time()}")
+            if save_clean_ok:
+                distribution_msg += f"\n🧹 *Đã dọn sạch các ghi chú đã xử lý khỏi INPUT_BOT.md!*"
             else:
-                err_text = await resp.text()
-                await update.message.reply_text(f"❌ Lỗi từ API Gemini ({resp.status}):\n`{err_text[:200]}`", parse_mode="Markdown")
+                distribution_msg += f"\n⚠️ *Lỗi: Không thể xóa ghi chú cũ trong INPUT_BOT.md!*"
+
+            await update.message.reply_text(distribution_msg, parse_mode="Markdown")
+
+        elif status in (429, 500, 503):
+            await update.message.reply_text(
+                f"⚠️ **Lỗi {status} (Quá tải):** Máy chủ Gemini đang bận. Quá trình report đã bị hủy để tránh mất dữ liệu. Bạn đợi vài phút rồi gọi lại `/report` nhé.",
+                parse_mode="Markdown"
+            )
+        elif status == 404:
+            await update.message.reply_text(
+                "⚠️ **Lỗi 404:** Không tìm được model Gemini khả dụng cho API key này. Hãy kiểm tra API key hoặc đặt biến môi trường `GEMINI_MODEL`.",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(f"❌ Lỗi từ API Gemini ({status}):\n`{err_text[:200]}`", parse_mode="Markdown")
 
     except Exception as e:
         await update.message.reply_text(f"❌ Đã xảy ra lỗi hệ thống hoặc phân tích JSON: {str(e)}")
@@ -547,7 +585,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     asyncio.create_task(context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING))
     try:
-        reply_content = await asyncio.wait_for(call_gemini(chat_id, user_text), timeout=45.0)
+        reply_content = await asyncio.wait_for(call_gemini(chat_id, user_text), timeout=70.0)
         await update.message.reply_text(reply_content)
         asyncio.create_task(log_to_sheet(chat_id, sender_name, user_text, reply_content))
     except Exception as e:
