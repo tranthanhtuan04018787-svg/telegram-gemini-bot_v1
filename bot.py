@@ -402,6 +402,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "generationConfig": {"temperature": 0.2}
     }
 
+    # THÊM KHỐI TRY...EXCEPT Ở ĐÂY ĐỂ TRÁNH LỖI SYNTAX
     try:
         session = await get_http_session()
         async with session.post(url, json=payload, timeout=45) as resp:
