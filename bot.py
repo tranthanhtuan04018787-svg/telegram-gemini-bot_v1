@@ -130,14 +130,13 @@ async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply
         logging.error(f"Lỗi ghi Google Sheet: {e}")
 
 async def save_note_to_github(note_content: str) -> tuple[bool, str]:
-    """Lưu ghi chú và trả về chi tiết phản hồi để gỡ lỗi."""
+    """Lưu ghi chú vào kho GitHub Brain-2 cho Obsidian."""
     if not GITHUB_TOKEN:
         return False, "Thiếu biến GITHUB_TOKEN trên Render!"
     if not GITHUB_REPO:
         return False, "Thiếu biến GITHUB_REPO trên Render!"
 
     session = await get_http_session()
-    # Lưu trực tiếp vào Inbox.md ở thư mục gốc để loại trừ lỗi đường dẫn thư mục
     file_path = "Inbox.md"
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
     
@@ -167,7 +166,7 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
                 err_body = await resp.text()
                 return False, f"Lỗi GET ({resp.status}): {err_body[:180]}"
 
-        # 2. Chuẩn bị nội dung mã hóa Base64
+        # 2. Chuẩn bị nội dung
         new_text = existing_text + formatted_entry
         encoded_content = base64.b64encode(new_text.encode("utf-8")).decode("utf-8")
 
@@ -179,7 +178,7 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
         if sha:
             payload["sha"] = sha
 
-        # 3. Ghi file lên nhánh main
+        # 3. Ghi đè hoặc tạo mới file
         async with session.put(url, headers=headers, json=payload, timeout=20) as put_resp:
             if put_resp.status in [200, 201]:
                 return True, "Thành công"
@@ -188,84 +187,6 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
                 return False, f"Lỗi PUT ({put_resp.status}): {err_body[:180]}"
     except Exception as e:
         return False, f"Ngoại lệ kết nối: {str(e)}"
-
-async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id).strip()
-    if chat_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("Bạn không có quyền thực hiện lệnh này.")
-        return
-
-    note_text = " ".join(context.args).strip()
-    if not note_text:
-        await update.message.reply_text("⚠️ Nhập nội dung sau lệnh! Ví dụ: `/note Kiểm tra`", parse_mode="Markdown")
-        return
-
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-    ok, debug_info = await save_note_to_github(note_text)
-
-    if ok:
-        await update.message.reply_text(f"✅ **Đã lưu vào Obsidian:**\n_{note_text}_", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(f"❌ **Lỗi chi tiết từ GitHub:**\n`{debug_info}`", parse_mode="Markdown")
-
-async def call_gemini(chat_id: str, user_text: str) -> str:
-    global active_model_name, cached_models
-    if chat_id not in user_histories:
-        user_histories[chat_id] = []
-
-    user_histories[chat_id].append({"role": "user", "parts": [{"text": user_text}]})
-    if len(user_histories[chat_id]) > MAX_HISTORY:
-        user_histories[chat_id] = user_histories[chat_id][-MAX_HISTORY:]
-
-    base_url = "https://generativelanguage.googleapis.com/v1beta"
-    headers = {"Content-Type": "application/json"}
-    dynamic_system_prompt = (
-        SYSTEM_PROMPT
-        + f"\n\n[THÔNG TIN BẮT BUỘC]: Thời gian hiện tại là {get_vn_time()} (Giờ Việt Nam)."
-    )
-
-    payload = {
-        "systemInstruction": {"parts": [{"text": dynamic_system_prompt}]},
-        "contents": user_histories[chat_id],
-        "generationConfig": {"maxOutputTokens": 600, "temperature": 0.7},
-    }
-
-    try:
-        session = await get_http_session()
-        last_error = ""
-
-        for idx, chosen_model in enumerate(list(cached_models)):
-            model_path = chosen_model if chosen_model.startswith("models/") else f"models/{chosen_model}"
-            gen_url = f"{base_url}/{model_path}:generateContent?key={GEMINI_API_KEY}"
-
-            async with session.post(gen_url, headers=headers, json=payload, timeout=30) as gen_resp:
-                if gen_resp.status == 200:
-                    gen_data = await gen_resp.json()
-                    try:
-                        bot_reply = gen_data["candidates"][0]["content"]["parts"][0]["text"]
-                        user_histories[chat_id].append({"role": "model", "parts": [{"text": bot_reply}]})
-                        active_model_name = model_path
-                        if idx > 0 and chosen_model in cached_models:
-                            cached_models.remove(chosen_model)
-                            cached_models.insert(0, chosen_model)
-                        return bot_reply
-                    except (KeyError, IndexError):
-                        continue
-                elif gen_resp.status == 404:
-                    asyncio.create_task(refresh_models_from_google())
-                    continue
-                elif gen_resp.status in [429, 503]:
-                    continue
-                else:
-                    last_error = f"Mã {gen_resp.status} ({model_path}): {await gen_resp.text()}"
-                    continue
-
-        user_histories[chat_id].pop()
-        return f"⚠️ Không thể kết nối AI. Chi tiết: {last_error[:300]}"
-
-    except Exception as e:
-        user_histories[chat_id].pop()
-        return f"❌ LỖI HỆ THỐNG/MẠNG:\n{str(e)}"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
@@ -286,7 +207,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
     
-    # Kiểm tra phân quyền: Chỉ có Admin mới được lưu note vào Obsidian
     if chat_id != ADMIN_CHAT_ID:
         await update.message.reply_text("Bạn không có quyền sử dụng tính năng lưu ghi chú này.")
         return
@@ -297,12 +217,12 @@ async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-    success = await save_note_to_github(note_text)
+    ok, debug_info = await save_note_to_github(note_text)
 
-    if success:
+    if ok:
         await update.message.reply_text(f"✅ **Đã lưu vào Obsidian:**\n_{note_text}_", parse_mode="Markdown")
     else:
-        await update.message.reply_text("❌ Lưu vào GitHub thất bại. Vui lòng kiểm tra lại GITHUB_TOKEN hoặc quyền ghi repo trên Render.")
+        await update.message.reply_text(f"❌ **Lỗi chi tiết từ GitHub:**\n`{debug_info}`", parse_mode="Markdown")
 
 async def check_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top_models = "\n".join([f"• `{m}`" for m in cached_models[:6]])
