@@ -58,10 +58,6 @@ def get_vn_time() -> str:
     now = datetime.now(timezone.utc) + timedelta(hours=7)
     return now.strftime("%d/%m/%Y %H:%M:%S")
 
-def get_vn_date() -> str:
-    now = datetime.now(timezone.utc) + timedelta(hours=7)
-    return now.strftime("%Y-%m-%d")
-
 async def get_http_session() -> aiohttp.ClientSession:
     global http_session
     if http_session is None or http_session.closed:
@@ -130,7 +126,7 @@ async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply
         logging.error(f"Lỗi ghi Google Sheet: {e}")
 
 async def save_note_to_github(note_content: str) -> tuple[bool, str]:
-    """Lưu ghi chú vào kho GitHub Brain-2 cho Obsidian."""
+    """Lưu ghi chú trực tiếp vào file Inbox.md của Vault Obsidian."""
     token = str(GITHUB_TOKEN or "").strip()
     repo = str(GITHUB_REPO or "").strip()
 
@@ -146,6 +142,7 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "Telegram-Obsidian-Bot",
     }
 
     timestamp = get_vn_time()
@@ -155,8 +152,8 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
         sha = None
         existing_text = ""
         
-        # 1. Kiểm tra file cũ trên GitHub (nhánh main)
-        async with session.get(f"{url}?ref=main", headers=headers, timeout=15) as resp:
+        # 1. Kiểm tra file cũ trên GitHub
+        async with session.get(url, headers=headers, timeout=15) as resp:
             if resp.status == 200:
                 file_info = await resp.json()
                 sha = file_info.get("sha")
@@ -166,29 +163,29 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
                 existing_text = "# 📥 Hộp thư đến (Inbox)\n\n"
             else:
                 err_body = await resp.text()
-                return False, f"Lỗi GET ({resp.status}): {err_body[:180]}"
+                return False, f"Lỗi GET ({resp.status}): {err_body[:150]}"
 
-        # 2. Gộp nội dung và mã hóa base64
+        # 2. Chuẩn bị nội dung mã hóa Base64
         new_text = existing_text + formatted_entry
         encoded_content = base64.b64encode(new_text.encode("utf-8")).decode("utf-8")
 
         payload = {
             "message": f"note: {timestamp}",
             "content": encoded_content,
-            "branch": "main",
         }
         if sha:
             payload["sha"] = sha
 
-        # 3. Ghi file lên nhánh main
+        # 3. Ghi file lên nhánh mặc định của repo
         async with session.put(url, headers=headers, json=payload, timeout=20) as put_resp:
             if put_resp.status in [200, 201]:
                 return True, "Thành công"
             else:
                 err_body = await put_resp.text()
-                return False, f"Lỗi PUT ({put_resp.status}): {err_body[:180]}"
+                return False, f"Lỗi PUT ({put_resp.status}) tại {url}: {err_body[:150]}"
     except Exception as e:
-        return False, f"Ngoại lệ: {str(e)}"
+        return False, f"Ngoại lệ kết nối: {str(e)}"
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
     user_histories[chat_id] = []
@@ -233,53 +230,4 @@ async def check_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    chat_id = str(update.effective_chat.id).strip()
-    sender_name = update.message.from_user.full_name
-
-    if ADMIN_CHAT_ID and chat_id != ADMIN_CHAT_ID:
-        report_msg = f"🔔 **Có tin nhắn mới tới Bot!**\n👤 Từ: {sender_name}\n💬 Nội dung: {user_text}"
-        asyncio.create_task(context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_msg))
-
-    asyncio.create_task(context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING))
-
-    try:
-        reply_content = await asyncio.wait_for(call_gemini(chat_id, user_text), timeout=45.0)
-        await update.message.reply_text(reply_content)
-        asyncio.create_task(log_to_sheet(chat_id, sender_name, user_text, reply_content))
-    except asyncio.TimeoutError:
-        await update.message.reply_text("⏳ Quá thời gian chờ (Timeout). Kết nối quá chậm.")
-    except Exception as e:
-        await update.message.reply_text(f"Rất tiếc, đã có lỗi xảy ra: {str(e)}")
-
-async def handle_ping(request):
-    return web.Response(text="Bot is live!")
-
-async def run_dummy_server():
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-
-async def main():
-    await run_dummy_server()
-    await refresh_models_from_google()
-
-    telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("note", note_cmd))
-    telegram_app.add_handler(CommandHandler("model", check_model_cmd))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    await telegram_app.initialize()
-    await telegram_app.start()
-    await telegram_app.updater.start_polling(drop_pending_updates=True)
-
-    while True:
-        await asyncio.sleep(3600)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+async def
