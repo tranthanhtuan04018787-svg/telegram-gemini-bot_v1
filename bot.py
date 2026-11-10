@@ -324,19 +324,25 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 3. Gửi cho Gemini xử lý
     ai_prompt = f"""
-    Bạn là trợ lý ảo quản lý dữ liệu. Dưới đây là các ghi chú tôi thu thập được trong {days} ngày qua:
+    Bạn là một chuyên gia quản lý dữ liệu cá nhân (Second Brain) trên Obsidian. 
+    Dưới đây là các ghi chú tôi thu thập được trong {days} ngày qua:
     {notes_text}
 
-    Hãy làm 3 việc:
+    Hãy thực hiện 3 việc sau và trả về định dạng JSON:
     1. Viết 1 đoạn tóm tắt tổng quan.
-    2. Phân loại các ghi chú vào các file: Cong_Viec.md, Y_Tuong.md, Kien_Thuc.md, Tai_Chinh.md, Khac.md.
-    3. TRONG NỘI DUNG TỪNG GHI CHÚ, HÃY TỰ ĐỘNG BỌC CÁC TỪ KHÓA QUAN TRỌNG (tên người, tên dự án, khái niệm cốt lõi, địa điểm, sự kiện) BẰNG CẶP NGOẶC VUÔNG `[[ ]]` ĐỂ TẠO LIÊN KẾT TỰ ĐỘNG CHO OBSIDIAN. (Ví dụ: "Hôm nay họp với [[Anh Minh]] về [[Dự án X]]").
+    2. Phân loại các ghi chú vào đúng các file: Cong_Viec.md, Y_Tuong.md, Kien_Thuc.md, Tai_Chinh.md, Khac.md.
+    3. Bọc từ khóa bằng cú pháp liên kết `[[Từ khóa]]` theo CÁC QUY TẮC NGHIÊM NGẶT sau:
+       - CHỈ BỌC LINK CHO: Tên người cụ thể, Tên phần mềm/công cụ (Obsidian, Python, Telegram...), Tên dự án, hoặc Khái niệm chuyên môn cốt lõi (AI, Regex, Automation...).
+       - TUYỆT ĐỐI KHÔNG BỌC LINK: Các đại từ, danh từ chung chung, hành động hàng ngày (ví dụ: công việc, hôm nay, ý tưởng, đi ăn, mua sắm, báo cáo).
+       - VÍ DỤ ĐÚNG 1: "Sửa lỗi parse entities cho bot Telegram" -> "Sửa lỗi parse entities cho [[bot Telegram]]"
+       - VÍ DỤ ĐÚNG 2: "Đi siêu thị mua đồ ăn hết 200k" -> "Đi siêu thị mua đồ ăn hết 200k" (Giữ nguyên vì không có từ khóa chuyên môn).
+       - VÍ DỤ SAI (CẦN TRÁNH): "Hoàn thành [[công việc]] [[hôm nay]]" (Rác liên kết).
 
     BẮT BUỘC TRẢ VỀ CHUẨN JSON, KHÔNG BỌC TRONG THẺ ```json:
     {{
       "summary": "Nội dung tóm tắt...",
       "categories": {{
-        "Cong_Viec.md": ["ghi chú 1 có chứa [[từ khóa]]", "ghi chú 2"],
+        "Cong_Viec.md": ["ghi chú 1 có chứa [[từ khóa]]", "ghi chú 2 bình thường"],
         "Y_Tuong.md": ["ghi chú 3 về [[chủ đề A]]"]
       }}
     }}
