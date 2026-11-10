@@ -73,7 +73,6 @@ async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply
         logging.error(f"Lỗi ghi Google Sheet: {e}")
 
 async def save_note_to_github(note_content: str) -> tuple[bool, str]:
-    """Lưu ghi chú trực tiếp vào file Inbox.md của Vault Obsidian."""
     token = str(GITHUB_TOKEN or "").strip()
     repo = str(GITHUB_REPO or "").strip()
 
@@ -87,7 +86,7 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
     url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
     
     headers = {
-        "Authorization": f"token {token}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github.v3+json",
         "User-Agent": "Telegram-Obsidian-Bot",
     }
@@ -107,9 +106,10 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
                 existing_text = raw_bytes.decode("utf-8", errors="ignore")
             elif resp.status == 404:
                 existing_text = "# 📥 Hộp thư đến (Inbox)\n\n"
+            elif resp.status == 401:
+                return False, "Lỗi 401: GITHUB_TOKEN bị sai hoặc đã bị thu hồi."
             else:
-                err_body = await resp.text()
-                return False, f"Lỗi GET ({resp.status}): {err_body[:150]}"
+                return False, f"Lỗi GET ({resp.status}): {await resp.text()}"
 
         new_text = existing_text + formatted_entry
         encoded_content = base64.b64encode(new_text.encode("utf-8")).decode("utf-8")
@@ -124,11 +124,14 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
         async with session.put(url, headers=headers, json=payload, timeout=20) as put_resp:
             if put_resp.status in [200, 201]:
                 return True, "Thành công"
+            elif put_resp.status == 404:
+                masked_token = f"...{token[-4:]}" if len(token) > 4 else "Lỗi"
+                return False, f"LỖI QUYỀN TRUY CẬP KHO (404):\n1. Tên kho đang kết nối: `{repo}` (Kiểm tra xem đúng 100% chưa)\n2. Token đang dùng kết thúc bằng: `{masked_token}` (Cần đảm bảo Token này đã được tích chọn quyền 'repo' trên GitHub)."
             else:
                 err_body = await put_resp.text()
-                return False, f"Lỗi PUT ({put_resp.status}): {err_body[:150]}"
+                return False, f"Lỗi PUT ({put_resp.status}): {err_body[:100]}"
     except Exception as e:
-        return False, f"Ngoại lệ kết nối: {str(e)}"
+        return False, f"Ngoại lệ: {str(e)}"
 
 async def call_gemini(chat_id: str, user_text: str) -> str:
     if chat_id not in user_histories:
