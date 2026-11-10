@@ -55,7 +55,6 @@ Tuyệt đối không nhận mình là AI do Google tạo ra.
 """
 
 # System Instruction chuyên biệt dành riêng cho việc xử lý / report Second Brain
-# System Instruction chuyên biệt dành riêng cho việc xử lý / report Second Brain
 SECOND_BRAIN_SYSTEM_INSTRUCTION = """
 Bạn là một Senior Knowledge Architect & Obsidian Vault Engineer chuyên nghiệp. 
 Nhiệm vụ của bạn là tiếp nhận các ghi chú thô từ Inbox, biên tập, hệ thống hóa và phân loại chúng vào các tệp mục tiêu (Cong_Viec.md, Y_Tuong.md, Kien_Thuc.md, Tai_Chinh.md, Khac.md).
@@ -445,6 +444,10 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     distribution_msg += f"\n⚠️ *Lỗi: Không thể xóa ghi chú cũ trong INPUT_BOT.md!*"
 
                 await update.message.reply_text(distribution_msg, parse_mode="Markdown")
+            else:
+                await update.message.reply_text(f"❌ Lỗi từ API Gemini: {resp.status}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Đã xảy ra lỗi trong quá trình xử lý: {str(e)}")
                 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
