@@ -195,7 +195,7 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
     if len(user_histories[chat_id]) > MAX_HISTORY:
         user_histories[chat_id] = user_histories[chat_id][-MAX_HISTORY:]
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
     headers = {"Content-Type": "application/json"}
     dynamic_prompt = SYSTEM_PROMPT + f"\n\n[Thời gian]: {get_vn_time()} (Giờ VN)."
 
