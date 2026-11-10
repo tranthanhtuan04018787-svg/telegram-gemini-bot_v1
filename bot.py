@@ -136,22 +136,26 @@ async def save_note_to_github(note_content: str) -> bool:
         return False
 
     session = await get_http_session()
-    # Lưu vào file 0. Inbox/Inbox.md trong vault
-    file_path = "0.%20Inbox/Inbox.md"
+    
+    # 1. Đường dẫn tệp chuẩn trong vault (không dùng %20)
+    file_path = "0. Inbox/Inbox.md"
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
+    
     headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
     timestamp = get_vn_time()
     formatted_entry = f"\n- **[{timestamp}]**: {note_content}\n"
 
     try:
-        # 1. Kiểm tra xem file đã tồn tại trên GitHub chưa để lấy SHA
         sha = None
         existing_text = ""
-        async with session.get(url, headers=headers, timeout=15) as resp:
+        
+        # 2. Kiểm tra xem file đã tồn tại trên nhánh main chưa
+        async with session.get(f"{url}?ref=main", headers=headers, timeout=15) as resp:
             if resp.status == 200:
                 file_info = await resp.json()
                 sha = file_info.get("sha")
@@ -159,8 +163,11 @@ async def save_note_to_github(note_content: str) -> bool:
                 existing_text = raw_bytes.decode("utf-8", errors="ignore")
             elif resp.status == 404:
                 existing_text = "# 📥 Hộp thư đến (Inbox)\n\n"
+            else:
+                err_text = await resp.text()
+                logging.error(f"Lỗi kiểm tra file GitHub ({resp.status}): {err_text}")
 
-        # 2. Gộp nội dung mới vào file
+        # 3. Gộp nội dung và mã hóa base64
         new_text = existing_text + formatted_entry
         encoded_content = base64.b64encode(new_text.encode("utf-8")).decode("utf-8")
 
@@ -172,16 +179,16 @@ async def save_note_to_github(note_content: str) -> bool:
         if sha:
             payload["sha"] = sha
 
-        # 3. Đẩy nội dung cập nhật lên nhánh main
+        # 4. Ghi đè/Tạo mới nội dung lên GitHub
         async with session.put(url, headers=headers, json=payload, timeout=20) as put_resp:
             if put_resp.status in [200, 201]:
                 return True
             else:
                 err_text = await put_resp.text()
-                logging.error(f"Lỗi GitHub API ({put_resp.status}): {err_text}")
+                logging.error(f"Lỗi PUT GitHub API ({put_resp.status}): {err_text}")
                 return False
     except Exception as e:
-        logging.error(f"Lỗi kết nối GitHub: {e}")
+        logging.error(f"Ngoại lệ kết nối GitHub: {e}")
         return False
 
 async def call_gemini(chat_id: str, user_text: str) -> str:
