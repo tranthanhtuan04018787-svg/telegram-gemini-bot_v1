@@ -342,7 +342,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     
     model_name = await get_active_gemini_model()
-    url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){model_name}:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_API_KEY}"
     
     payload = {
         "contents": [{"role": "user", "parts": [{"text": ai_prompt}]}],
