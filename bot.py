@@ -50,6 +50,27 @@ Nếu họ hỏi Tuấn đâu, hãy nói rằng anh Tuấn đang bận chút vi�
 Tuyệt đối không nhận mình là AI do Google tạo ra.
 """
 
+# System Instruction chuyên biệt dành riêng cho việc xử lý / report Second Brain
+SECOND_BRAIN_SYSTEM_INSTRUCTION = """
+Bạn là một chuyên gia quản lý dữ liệu cá nhân (Second Brain) chuyên nghiệp trên Obsidian.
+Nhiệm vụ của bạn là đọc các ghi chú thô, tóm tắt tổng quan và phân loại chúng vào các tệp mục tiêu (Cong_Viec.md, Y_Tuong.md, Kien_Thuc.md, Tai_Chinh.md, Khac.md).
+
+QUY TẮC BỌC LINK [[ ]] NGHIÊM NGẶT:
+- CHỈ BỌC LINK CHO: Tên người cụ thể, Tên phần mềm/công cụ (Obsidian, Python, Telegram...), Tên dự án, hoặc Khái niệm chuyên môn cốt lõi (AI, Regex, Automation...).
+- TUYỆT ĐỐI KHÔNG BỌC LINK: Các đại từ, danh từ chung chung, hành động hàng ngày (ví dụ: công việc, hôm nay, ý tưởng, đi ăn, mua sắm, báo cáo).
+- VÍ DỤ ĐÚNG: "Sửa lỗi parse entities cho [[bot Telegram]]"
+- VÍ DỤ SAI (CẦN TRÁNH): "Hoàn thành [[công việc]] [[hôm nay]]" (Rác liên kết).
+
+BẮT BUỘC TRẢ VỀ CHUẨN JSON, KHÔNG BỌC TRONG THẺ MARKDOWN ```json:
+{
+  "summary": "Nội dung tóm tắt ngắn gọn...",
+  "categories": {
+    "Cong_Viec.md": ["ghi chú 1 có chứa [[từ khóa]]", "ghi chú 2 bình thường"],
+    "Y_Tuong.md": ["ghi chú 3 về [[chủ đề A]]"]
+  }
+}
+"""
+
 # 4. CÁC HÀM TIỆN ÍCH & TỰ ĐỘNG CHỌN MODEL
 def get_vn_time() -> str:
     now = datetime.now(timezone.utc) + timedelta(hours=7)
@@ -71,7 +92,7 @@ async def get_active_gemini_model() -> str:
     if CURRENT_MODEL:
         return CURRENT_MODEL
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models?key=](https://generativelanguage.googleapis.com/v1beta/models?key=){GEMINI_API_KEY}"
     try:
         session = await get_http_session()
         async with session.get(url, timeout=15) as resp:
@@ -101,7 +122,7 @@ async def read_github_file(file_path: str) -> str:
     token = str(GITHUB_TOKEN or "").strip()
     repo = str(GITHUB_REPO or "").strip()
     session = await get_http_session()
-    url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+    url = f"[https://api.github.com/repos/](https://api.github.com/repos/){repo}/contents/{file_path}"
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
     
     try:
@@ -114,11 +135,36 @@ async def read_github_file(file_path: str) -> str:
         logging.error(f"Lỗi đọc file {file_path}: {e}")
         return ""
 
+async def overwrite_github_file(file_path: str, new_content: str, commit_msg: str) -> bool:
+    token = str(GITHUB_TOKEN or "").strip()
+    repo = str(GITHUB_REPO or "").strip()
+    session = await get_http_session()
+    url = f"[https://api.github.com/repos/](https://api.github.com/repos/){repo}/contents/{file_path}"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+
+    try:
+        sha = None
+        async with session.get(url, headers=headers, timeout=15) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                sha = data.get("sha")
+
+        payload = {
+            "message": commit_msg,
+            "content": base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
+        }
+        if sha: payload["sha"] = sha
+
+        async with session.put(url, headers=headers, json=payload, timeout=20) as put_resp:
+            return put_resp.status in [200, 201]
+    except Exception:
+        return False
+
 async def append_to_github_file(file_path: str, entry_text: str) -> bool:
     token = str(GITHUB_TOKEN or "").strip()
     repo = str(GITHUB_REPO or "").strip()
     session = await get_http_session()
-    url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+    url = f"[https://api.github.com/repos/](https://api.github.com/repos/){repo}/contents/{file_path}"
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
 
     try:
@@ -148,7 +194,7 @@ async def upload_file_to_github_attachments(file_bytes: bytes, file_name: str) -
     token = str(GITHUB_TOKEN or "").strip()
     repo = str(GITHUB_REPO or "").strip()
     session = await get_http_session()
-    url = f"https://api.github.com/repos/{repo}/contents/attachments/{file_name}"
+    url = f"[https://api.github.com/repos/](https://api.github.com/repos/){repo}/contents/attachments/{file_name}"
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
@@ -211,7 +257,7 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
     if len(user_histories[chat_id]) > MAX_HISTORY: user_histories[chat_id] = user_histories[chat_id][-MAX_HISTORY:]
 
     model_name = await get_active_gemini_model()
-    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){model_name}:generateContent?key={GEMINI_API_KEY}"
     
     headers = {"Content-Type": "application/json"}
     dynamic_prompt = SYSTEM_PROMPT + f"\n\n[Thời gian]: {get_vn_time()} (Giờ VN)."
@@ -250,7 +296,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Chào anh Tuấn! Trợ lý Obsidian đã sẵn sàng:\n\n"
             "📌 **Các cách lưu dữ liệu:**\n"
             "• `/note <nội dung>`: Lưu nhanh ghi chú vào INPUT_BOT.md\n"
-            "• `/report <số ngày>`: AI tổng hợp và phân loại ghi chú\n"
+            "• `/report <số ngày>`: AI tổng hợp, phân loại và dọn sạch Inbox\n"
             "• **Gửi ảnh trực tiếp**: Tự lưu vào attachments/\n"
             "• **Gửi video/tệp (< 15MB)**: Tự động lưu vào GitHub Vault\n"
             "• **Gửi file lớn (> 15MB)**: Tự đẩy lên Google Drive"
@@ -287,7 +333,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args[0].isdigit():
         days = int(context.args[0])
 
-    await update.message.reply_text(f"⏳ AI đang đọc và phân tích dữ liệu {days} ngày qua. Vui lòng đợi...")
+    await update.message.reply_text(f"⏳ AI đang đọc, phân tích và dọn dẹp dữ liệu {days} ngày qua...")
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     # 1. Đọc file
@@ -296,62 +342,49 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Không thể đọc file INPUT_BOT.md hoặc file trống.")
         return
 
-    # 2. Lọc ghi chú (Khắc phục triệt để lỗi lệch múi giờ Python)
+    # 2. Lọc ghi chú và giữ lại các ghi chú cũ chưa đến kỳ hạn report (để không làm mất dữ liệu)
     now_vn = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=7)
     cutoff_date = (now_vn - timedelta(days=days)).replace(hour=0, minute=0, second=0)
 
-    # Chẻ chuỗi và "bắt" luôn cả Ngày lẫn Giờ 
     parts = re.split(r'\[(\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2})\]', raw_content)
 
     filtered_notes = []
+    remaining_text_blocks = [] # Lưu trữ các phần ghi chú nằm ngoài khoảng thời gian report để giữ lại
+    
+    # Lấy phần tiêu đề gốc của file (nếu có)
+    header_part = parts[0] if len(parts) > 0 else "# 📂 INPUT_BOT\n\n"
+
     for i in range(1, len(parts), 2):
         date_str = parts[i]
         content = parts[i+1]
+        block_full = f"-[{date_str}]{content}"
         try:
             note_date = datetime.strptime(date_str, "%d/%m/%Y %H:%M:%S")
             if note_date >= cutoff_date:
                 clean_content = re.sub(r"^[\*\s:\-•]+", "", content).strip()
                 if clean_content:
                     filtered_notes.append(f"- {clean_content}")
+            else:
+                # Giữ lại các ghi chú cũ hơn mốc thời gian report
+                remaining_text_blocks.append(block_full)
         except Exception:
+            remaining_text_blocks.append(block_full)
             continue
 
     if not filtered_notes:
-        await update.message.reply_text(f"⚠️ Không tìm thấy ghi chú nào từ {cutoff_date.strftime('%d/%m/%Y')}.")
+        await update.message.reply_text(f"⚠️ Không tìm thấy ghi chú nào trong {days} ngày qua để tổng hợp.")
         return
 
     notes_text = "\n".join(filtered_notes)
 
-    # 3. Gửi cho Gemini xử lý
-    ai_prompt = f"""
-    Bạn là một chuyên gia quản lý dữ liệu cá nhân (Second Brain) trên Obsidian. 
-    Dưới đây là các ghi chú tôi thu thập được trong {days} ngày qua:
-    {notes_text}
-
-    Hãy thực hiện 3 việc sau và trả về định dạng JSON:
-    1. Viết 1 đoạn tóm tắt tổng quan.
-    2. Phân loại các ghi chú vào đúng các file: Cong_Viec.md, Y_Tuong.md, Kien_Thuc.md, Tai_Chinh.md, Khac.md.
-    3. Bọc từ khóa bằng cú pháp liên kết `[[Từ khóa]]` theo CÁC QUY TẮC NGHIÊM NGẶT sau:
-       - CHỈ BỌC LINK CHO: Tên người cụ thể, Tên phần mềm/công cụ (Obsidian, Python, Telegram...), Tên dự án, hoặc Khái niệm chuyên môn cốt lõi (AI, Regex, Automation...).
-       - TUYỆT ĐỐI KHÔNG BỌC LINK: Các đại từ, danh từ chung chung, hành động hàng ngày (ví dụ: công việc, hôm nay, ý tưởng, đi ăn, mua sắm, báo cáo).
-       - VÍ DỤ ĐÚNG 1: "Sửa lỗi parse entities cho bot Telegram" -> "Sửa lỗi parse entities cho [[bot Telegram]]"
-       - VÍ DỤ ĐÚNG 2: "Đi siêu thị mua đồ ăn hết 200k" -> "Đi siêu thị mua đồ ăn hết 200k" (Giữ nguyên vì không có từ khóa chuyên môn).
-       - VÍ DỤ SAI (CẦN TRÁNH): "Hoàn thành [[công việc]] [[hôm nay]]" (Rác liên kết).
-
-    BẮT BUỘC TRẢ VỀ CHUẨN JSON, KHÔNG BỌC TRONG THẺ ```json:
-    {{
-      "summary": "Nội dung tóm tắt...",
-      "categories": {{
-        "Cong_Viec.md": ["ghi chú 1 có chứa [[từ khóa]]", "ghi chú 2 bình thường"],
-        "Y_Tuong.md": ["ghi chú 3 về [[chủ đề A]]"]
-      }}
-    }}
-    """
+    # 3. Gửi cho Gemini xử lý (Áp dụng systemInstruction chuyên biệt)
+    ai_prompt = f"Dưới đây là các ghi chú tôi thu thập được trong {days} ngày qua:\n{notes_text}\n\nHãy phân tích, tóm tắt và phân loại theo đúng định dạng JSON đã quy định."
     
     model_name = await get_active_gemini_model()
-    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){model_name}:generateContent?key={GEMINI_API_KEY}"
     
     payload = {
+        "systemInstruction": {"parts": [{"text": SECOND_BRAIN_SYSTEM_INSTRUCTION}]},
         "contents": [{"role": "user", "parts": [{"text": ai_prompt}]}],
         "generationConfig": {"temperature": 0.2}
     }
@@ -375,15 +408,20 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 report_text = f"\n\n## Báo cáo {days} ngày qua (Tạo ngày {get_vn_time()})\n**Tóm tắt:** {summary}\n"
                 await append_to_github_file("Bao_Cao_Tong_Hop.md", report_text)
 
-                # 5. Phân phối
-                distribution_msg = f"Đã phân tích Báo cáo {days} ngày!\n\nTóm tắt: {summary}\n\nPhân bổ:\n"
+                # 5. Phân phối vào các file mục tiêu
+                distribution_msg = f"✅ **Đã hoàn thành Báo cáo {days} ngày!**\n\n📌 **Tóm tắt:** {summary}\n\n📂 **Phân bổ:**\n"
                 for cat_file, items in categories.items():
                     if items:
                         formatted_items = "\n".join([f"- [ ] {item}" for item in items])
                         await append_to_github_file(cat_file, f"\n\n### Từ INPUT_BOT ngày {get_vn_time()}:\n{formatted_items}\n")
-                        distribution_msg += f"- {cat_file}: {len(items)} mục\n"
+                        distribution_msg += f"- `{cat_file}`: {len(items)} mục\n"
 
-                await update.message.reply_text(distribution_msg) 
+                # 6. TỰ ĐỘNG DỌN DẸP / NÉN FILE INPUT_BOT.md (Làm sạch Inbox)
+                new_input_content = header_part + "".join(remaining_text_blocks)
+                await overwrite_github_file("INPUT_BOT.md", new_input_content, f"Clean up INPUT_BOT after report: {get_vn_time()}")
+                distribution_msg += f"\n🧹 *Đã dọn sạch các ghi chú đã xử lý khỏi INPUT_BOT.md!*"
+
+                await update.message.reply_text(distribution_msg, parse_mode="Markdown") 
             elif resp.status == 503:
                 CURRENT_MODEL = None
                 await update.message.reply_text("⚠️ API đang quá tải (503). Vui lòng thử lại sau.")
@@ -477,7 +515,7 @@ async def main():
     
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("note", note_cmd))
-    telegram_app.add_handler(CommandHandler("report", report_cmd)) # Lệnh Report bằng AI
+    telegram_app.add_handler(CommandHandler("report", report_cmd)) 
     
     media_filters = filters.PHOTO | filters.VIDEO | filters.Document.ALL
     telegram_app.add_handler(MessageHandler(media_filters, handle_media))
