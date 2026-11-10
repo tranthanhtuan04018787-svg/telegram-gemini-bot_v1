@@ -86,3 +86,22 @@ async def append_to_input_md(entry_text: str) -> tuple[bool, str]:
             else:
                 err_body = await resp.text()
                 return False, f"Lỗi GET INPUT.md ({resp.status}): {err_body[:120]}"
+
+        new_text = existing_text + entry_text
+        encoded_content = base64.b64encode(new_text.encode("utf-8")).decode("utf-8")
+
+        payload = {
+            "message": f"update input: {get_vn_time()}",
+            "content": encoded_content,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        async with session.put(url, headers=headers, json=payload, timeout=20) as put_resp:
+            if put_resp.status in [200, 201]:
+                return True, "Thành công"
+            else:
+                err_body = await put_resp.text()
+                return False, f"Lỗi PUT INPUT.md ({put_resp.status}): {err_body[:120]}"
+    except Exception as e:
+        return False, f"Lỗi ngoại lệ INPUT.md: {str(e)}"
