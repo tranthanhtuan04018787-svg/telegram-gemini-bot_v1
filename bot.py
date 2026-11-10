@@ -101,46 +101,55 @@ async def get_http_session() -> aiohttp.ClientSession:
     return http_session
 
 async def get_active_gemini_model() -> str:
+    """
+    Thay vì phụ thuộc hoàn toàn vào API /models công cộng hay bị lỗi,
+    hàm này ưu tiên danh sách các model ổn định thực tế, 
+    hoặc tự động quét với bộ lọc cực kỳ an toàn.
+    """
     global CURRENT_MODEL
     if CURRENT_MODEL:
         return CURRENT_MODEL
 
+    # Danh sách các model dự phòng theo thứ tự ưu tiên (ưu tiên dòng 2.0 và 1.5 mới nhất)
+    fallback_models = [
+        "models/gemini-2.0-flash",
+        "models/gemini-1.5-flash-latest",
+        "models/gemini-1.5-flash",
+        "models/gemini-1.5-pro"
+    ]
+
     url = f"{GEMINI_API_BASE}/models?key={GEMINI_API_KEY}"
     try:
         session = await get_http_session()
-        async with session.get(url, timeout=15) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 valid_models = []
                 for m in data.get("models", []):
                     name = m.get("name", "")
                     methods = m.get("supportedGenerationMethods", [])
-                    # Chỉ lấy các model hỗ trợ generateContent và loại bỏ các bản thử nghiệm (exp)
-                    if "generateContent" in methods and "exp" not in name:
+                    if "generateContent" in methods and "exp" not in name and "vision" not in name:
                         valid_models.append(name)
                 
-                # Ưu tiên tìm các dòng flash ổn định mới nhất hiện có
-                flash_models = [m for m in valid_models if "flash" in m.lower()]
+                # Tìm xem có model flash nào trong danh sách trả về khớp với danh sách ưu tiên không
+                for preferred in fallback_models:
+                    if preferred in valid_models:
+                        CURRENT_MODEL = preferred
+                        logging.info(f"✅ Chọn model từ whitelist API: {CURRENT_MODEL}")
+                        return CURRENT_MODEL
                 
+                # Nếu không khớp, lấy bất kỳ model flash nào hợp lệ
+                flash_models = [m for m in valid_models if "flash" in m.lower()]
                 if flash_models:
-                    # Sắp xếp để ưu tiên chọn tên ngắn gọn chuẩn xác nhất
                     flash_models.sort(key=len)
                     CURRENT_MODEL = flash_models[0]
-                elif valid_models:
-                    CURRENT_MODEL = valid_models[0]
-                else:
-                    CURRENT_MODEL = "models/gemini-2.0-flash" # Dự phòng chuẩn
-                
-                logging.info(f"✅ Đã chọn Model an toàn: {CURRENT_MODEL}")
-                return CURRENT_MODEL
-            else:
-                # Nếu API /models lỗi, gán cứng model dự phòng an toàn
-                CURRENT_MODEL = "models/gemini-2.0-flash"
-                return CURRENT_MODEL
+                    return CURRENT_MODEL
     except Exception as e:
-        logging.error(f"Lỗi khi fetch model: {e}")
-        CURRENT_MODEL = "models/gemini-2.0-flash"
-        return CURRENT_MODEL
+        logging.warning(f"Không thể fetch danh sách model từ API: {e}")
+
+    # Nếu quét lỗi hoặc không tìm thấy, ép dùng mặc định dòng ổn định nhất
+    CURRENT_MODEL = "models/gemini-2.0-flash"
+    return CURRENT_MODEL
 
 # 5. CÁC HÀM XỬ LÝ GITHUB VÀ GOOGLE DRIVE
 async def read_github_file(file_path: str) -> str:
