@@ -70,7 +70,7 @@ async def append_to_input_md(entry_text: str) -> tuple[bool, str]:
     repo = str(GITHUB_REPO or "").strip()
     session = await get_http_session()
     
-    file_path = "INPUT.md"
+    file_path = "INPUT_BOT.md"
     url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
     headers = {
         "Authorization": f"token {token}",
