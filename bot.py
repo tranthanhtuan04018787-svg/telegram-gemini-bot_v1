@@ -111,30 +111,40 @@ async def get_active_gemini_model() -> str:
         async with session.get(url, timeout=15) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                # Chỉ lấy các model hỗ trợ generateContent
-                valid_models = [m["name"] for m in data.get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
                 
-                # Ưu tiên các dòng flash mới nhất
-                if valid_models:
-                    # 1. Tìm gemini-1.5-flash-latest hoặc gemini-1.5-flash
-                    preferred = [m for m in valid_models if "gemini-1.5-flash" in m]
-                    if preferred:
-                        CURRENT_MODEL = preferred[-1] # Lấy bản mới nhất trong list nếu có nhiều
-                    # 2. Nếu không có 1.5 flash, lấy bất kỳ model flash nào
-                    else:
-                        flash_models = [m for m in valid_models if "flash" in m.lower()]
-                        CURRENT_MODEL = flash_models[0] if flash_models else valid_models[0]
+                # Lọc ra tất cả các model hợp lệ và hỗ trợ generateContent
+                valid_models = []
+                for m in data.get("models", []):
+                    # Tên model thường có dạng "models/gemini-1.5-flash"
+                    name = m.get("name", "")
+                    methods = m.get("supportedGenerationMethods", [])
+                    if "generateContent" in methods:
+                        valid_models.append(name)
+                
+                if not valid_models:
+                    return "models/gemini-1.5-flash" # Dự phòng
+
+                # Ưu tiên tìm chính xác chuỗi "gemini-1.5-flash" (không lấy bản thử nghiệm)
+                flash_15_models = [m for m in valid_models if "gemini-1.5-flash" in m and "exp" not in m and "vision" not in m]
+                
+                if flash_15_models:
+                    # Nếu có nhiều phiên bản (ví dụ 001, 002, latest), ưu tiên lấy bản gốc ngắn nhất
+                    # hoặc bản mới nhất nếu bạn muốn (ở đây ta sắp xếp theo độ dài ngắn nhất để lấy "models/gemini-1.5-flash")
+                    flash_15_models.sort(key=len)
+                    CURRENT_MODEL = flash_15_models[0]
                 else:
-                    # Fallback mặc định an toàn nhất
-                    CURRENT_MODEL = "models/gemini-1.5-flash-latest"
+                    # Nếu không có 1.5 flash, tìm bất kỳ bản flash nào khác
+                    flash_models = [m for m in valid_models if "flash" in m.lower()]
+                    CURRENT_MODEL = flash_models[0] if flash_models else valid_models[0]
                 
-                logging.info(f"✅ Đã tự động chọn Model: {CURRENT_MODEL}")
+                logging.info(f"✅ Đã tự động lấy Model từ API: {CURRENT_MODEL}")
                 return CURRENT_MODEL
             else:
-                return "models/gemini-1.5-flash-latest"
+                logging.warning(f"Lỗi API /models ({resp.status}). Dùng model mặc định.")
+                return "models/gemini-1.5-flash"
     except Exception as e:
-        logging.error(f"Lỗi lấy danh sách model: {e}")
-        return "models/gemini-1.5-flash-latest"
+        logging.error(f"Lỗi khi fetch model: {e}")
+        return "models/gemini-1.5-flash"
 
 # 5. CÁC HÀM XỬ LÝ GITHUB VÀ GOOGLE DRIVE
 async def read_github_file(file_path: str) -> str:
