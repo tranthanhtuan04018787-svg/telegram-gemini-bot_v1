@@ -302,30 +302,33 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Không thể đọc file INPUT_BOT.md hoặc file trống.")
         return
 
-  # 2. Lọc ghi chú (Đã nới lỏng thuật toán nhận diện)
+ # 2. Lọc ghi chú (Thuật toán cắt chuỗi tuyệt đối - Bỏ qua mọi lỗi định dạng)
     now = datetime.now(timezone.utc) + timedelta(hours=7)
     cutoff_date = now - timedelta(days=days)
     
-    # Tìm kiếm linh hoạt: Chỉ cần có [DD/MM/YYYY HH:MM:SS] là nhận
-    pattern = r"\[(\d{2}/\d{2}/\d{4})\s\d{2}:\d{2}:\d{2}\](.*?)(?=\n.*?\[\d{2}/\d{2}/\d{4}\s|\Z)"
-    matches = re.findall(pattern, raw_content, re.DOTALL)
+    # Dùng cụm [Ngày Giờ] làm vách ngăn để chặt file thành các mảng dữ liệu
+    parts = re.split(r'\[(\d{2}/\d{2}/\d{4})\s\d{2}:\d{2}:\d{2}\]', raw_content)
 
     filtered_notes = []
-    for date_str, note_content in matches:
+    # parts[1] là ngày, parts[2] là nội dung, parts[3] lại là ngày...
+    for i in range(1, len(parts), 2):
+        date_str = parts[i]
+        content = parts[i+1]
         try:
             note_date = datetime.strptime(date_str, "%d/%m/%Y").replace(tzinfo=timezone(timedelta(hours=7)))
             if note_date >= cutoff_date:
-                # Xóa sạch các ký tự thừa bị kẹt ở đầu câu
-                clean_content = re.sub(r"^[\*\s:]+", "", note_content).strip()
+                # Gọt sạch các ký tự rác (dấu 2 chấm, gạch ngang, khoảng trắng) kẹt ở ngay đầu câu
+                clean_content = re.sub(r"^[\*\s:\-]+", "", content).strip()
                 if clean_content:
                     filtered_notes.append(f"- {clean_content}")
-        except ValueError:
+        except Exception:
             continue
 
-    # --- ĐÂY LÀ PHẦN CODE ĐÃ BỊ CẮT THIẾU LẦN TRƯỚC ---
     if not filtered_notes:
         await update.message.reply_text(f"⚠️ Không tìm thấy ghi chú nào trong {days} ngày qua.")
         return
+
+    notes_text = "\n".join(filtered_notes)
 
     notes_text = "\n".join(filtered_notes)
     # ---------------------------------------------------
