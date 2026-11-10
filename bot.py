@@ -67,7 +67,6 @@ async def get_http_session() -> aiohttp.ClientSession:
     return http_session
 
 async def get_active_gemini_model() -> str:
-    """Tự động quét và chọn model Gemini khả dụng nhất từ Google API."""
     global CURRENT_MODEL
     if CURRENT_MODEL:
         return CURRENT_MODEL
@@ -78,14 +77,10 @@ async def get_active_gemini_model() -> str:
         async with session.get(url, timeout=15) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                # Lọc các model hỗ trợ tạo văn bản
                 valid_models = [m["name"] for m in data.get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
-                
-                # Ưu tiên các dòng flash hoặc flash-lite nhẹ và nhanh
                 flash_models = [m for m in valid_models if "flash" in m.lower()]
                 
                 if flash_models:
-                    # Ưu tiên bản lite-preview nếu có để tránh kẹt mạng
                     preferred = [m for m in flash_models if "3.1-flash-lite" in m]
                     CURRENT_MODEL = preferred[0] if preferred else flash_models[0]
                 elif valid_models:
@@ -153,7 +148,6 @@ async def upload_file_to_github_attachments(file_bytes: bytes, file_name: str) -
     token = str(GITHUB_TOKEN or "").strip()
     repo = str(GITHUB_REPO or "").strip()
     session = await get_http_session()
-
     url = f"https://api.github.com/repos/{repo}/contents/attachments/{file_name}"
     headers = {
         "Authorization": f"token {token}",
@@ -236,7 +230,7 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
                 user_histories[chat_id].append({"role": "model", "parts": [{"text": bot_reply}]})
                 return bot_reply
             elif resp.status == 503:
-                CURRENT_MODEL = None # Xóa model hiện tại để lần sau quét lại
+                CURRENT_MODEL = None
                 return "⚠️ AI hiện đang quá tải (Lỗi 503). Vui lòng thử lại sau ít phút!"
             else:
                 err = await resp.text()
@@ -271,7 +265,7 @@ async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     note_text = " ".join(context.args).strip()
     if not note_text:
-        await update.message.reply_text("⚠️ Vui lòng nhập nội dung! Ví dụ: `/note Ý tưởng mới`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Vui lòng nhập nội dung! Ví dụ: `/note Ý tưởng mới`")
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
@@ -282,7 +276,7 @@ async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ok:
         await update.message.reply_text(f"✅ **Đã lưu vào INPUT_BOT.md:**\n_{note_text}_", parse_mode="Markdown")
     else:
-        await update.message.reply_text("❌ **Lỗi lưu file lên GitHub**", parse_mode="Markdown")
+        await update.message.reply_text("❌ **Lỗi lưu file lên GitHub**")
 
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CURRENT_MODEL
@@ -293,7 +287,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args[0].isdigit():
         days = int(context.args[0])
 
-    await update.message.reply_text(f"⏳ AI đang đọc và phân tích dữ liệu {days} ngày qua. Vui lòng đợi...", parse_mode="Markdown")
+    await update.message.reply_text(f"⏳ AI đang đọc và phân tích dữ liệu {days} ngày qua. Vui lòng đợi...")
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     # 1. Đọc file
@@ -302,14 +296,11 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Không thể đọc file INPUT_BOT.md hoặc file trống.")
         return
 
-# 2. Lọc ghi chú (Khắc phục triệt để lỗi lệch múi giờ Python)
-    # Lấy giờ VN hiện tại, xóa bỏ hệ tham chiếu múi giờ để Python không tự trừ đi 7 tiếng
+    # 2. Lọc ghi chú (Khắc phục triệt để lỗi lệch múi giờ Python)
     now_vn = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=7)
-    
-    # Lùi lại số ngày và đưa về 00:00:00 để quét trọn vẹn tất cả ghi chú của ngày hôm đó
     cutoff_date = (now_vn - timedelta(days=days)).replace(hour=0, minute=0, second=0)
 
-    # Chẻ chuỗi và "bắt" luôn cả Ngày lẫn Giờ (thay vì chỉ bắt ngày như trước)
+    # Chẻ chuỗi và "bắt" luôn cả Ngày lẫn Giờ 
     parts = re.split(r'\[(\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2})\]', raw_content)
 
     filtered_notes = []
@@ -317,10 +308,8 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date_str = parts[i]
         content = parts[i+1]
         try:
-            # So sánh chính xác thời gian (không bị ảnh hưởng bởi múi giờ)
             note_date = datetime.strptime(date_str, "%d/%m/%Y %H:%M:%S")
             if note_date >= cutoff_date:
-                # Dọn sạch các ký tự rác (*, :, -, chấm tròn, khoảng trắng)
                 clean_content = re.sub(r"^[\*\s:\-•]+", "", content).strip()
                 if clean_content:
                     filtered_notes.append(f"- {clean_content}")
@@ -331,7 +320,8 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Không tìm thấy ghi chú nào từ {cutoff_date.strftime('%d/%m/%Y')}.")
         return
 
-    notes_text = "\n".join(filtered_notes)-
+    notes_text = "\n".join(filtered_notes)
+
     # 3. Gửi cho Gemini xử lý
     ai_prompt = f"""
     Bạn là trợ lý ảo quản lý dữ liệu. Dưới đây là các ghi chú tôi thu thập được trong {days} ngày qua:
@@ -374,7 +364,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 summary = parsed_json.get("summary", "Không có tóm tắt.")
                 categories = parsed_json.get("categories", {})
 
-               # 4. Lưu Báo cáo tổng hợp
+                # 4. Lưu Báo cáo tổng hợp
                 report_text = f"\n\n## Báo cáo {days} ngày qua (Tạo ngày {get_vn_time()})\n**Tóm tắt:** {summary}\n"
                 await append_to_github_file("Bao_Cao_Tong_Hop.md", report_text)
 
@@ -386,7 +376,6 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await append_to_github_file(cat_file, f"\n\n### Từ INPUT_BOT ngày {get_vn_time()}:\n{formatted_items}\n")
                         distribution_msg += f"- {cat_file}: {len(items)} mục\n"
 
-                # GỬI TIN NHẮN KHÔNG CÓ PARSE_MODE ĐỂ TRÁNH LỖI "Can't parse entities"
                 await update.message.reply_text(distribution_msg) 
             elif resp.status == 503:
                 CURRENT_MODEL = None
