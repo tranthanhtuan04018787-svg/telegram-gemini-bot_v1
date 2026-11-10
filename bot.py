@@ -448,7 +448,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ Lỗi từ API Gemini: {resp.status}")
     except Exception as e:
         await update.message.reply_text(f"❌ Đã xảy ra lỗi trong quá trình xử lý: {str(e)}")
-                
+
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
     if chat_id != ADMIN_CHAT_ID: return
