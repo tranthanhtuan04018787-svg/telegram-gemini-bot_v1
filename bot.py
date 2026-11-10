@@ -111,24 +111,30 @@ async def get_active_gemini_model() -> str:
         async with session.get(url, timeout=15) as resp:
             if resp.status == 200:
                 data = await resp.json()
+                # Chỉ lấy các model hỗ trợ generateContent
                 valid_models = [m["name"] for m in data.get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
-                flash_models = [m for m in valid_models if "flash" in m.lower()]
                 
-                if flash_models:
-                    preferred = [m for m in flash_models if "3.1-flash-lite" in m]
-                    CURRENT_MODEL = preferred[0] if preferred else flash_models[0]
-                elif valid_models:
-                    CURRENT_MODEL = valid_models[0]
+                # Ưu tiên các dòng flash mới nhất
+                if valid_models:
+                    # 1. Tìm gemini-1.5-flash-latest hoặc gemini-1.5-flash
+                    preferred = [m for m in valid_models if "gemini-1.5-flash" in m]
+                    if preferred:
+                        CURRENT_MODEL = preferred[-1] # Lấy bản mới nhất trong list nếu có nhiều
+                    # 2. Nếu không có 1.5 flash, lấy bất kỳ model flash nào
+                    else:
+                        flash_models = [m for m in valid_models if "flash" in m.lower()]
+                        CURRENT_MODEL = flash_models[0] if flash_models else valid_models[0]
                 else:
-                    CURRENT_MODEL = "models/gemini-1.5-flash"
+                    # Fallback mặc định an toàn nhất
+                    CURRENT_MODEL = "models/gemini-1.5-flash-latest"
                 
                 logging.info(f"✅ Đã tự động chọn Model: {CURRENT_MODEL}")
                 return CURRENT_MODEL
             else:
-                return "models/gemini-1.5-flash"
+                return "models/gemini-1.5-flash-latest"
     except Exception as e:
         logging.error(f"Lỗi lấy danh sách model: {e}")
-        return "models/gemini-1.5-flash"
+        return "models/gemini-1.5-flash-latest"
 
 # 5. CÁC HÀM XỬ LÝ GITHUB VÀ GOOGLE DRIVE
 async def read_github_file(file_path: str) -> str:
@@ -288,9 +294,12 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
                 bot_reply = data["candidates"][0]["content"]["parts"][0]["text"]
                 user_histories[chat_id].append({"role": "model", "parts": [{"text": bot_reply}]})
                 return bot_reply
-            elif resp.status == 503:
+            elif resp.status in [500, 503]:
                 CURRENT_MODEL = None
-                return "⚠️ AI hiện đang quá tải (Lỗi 503). Vui lòng thử lại sau ít phút!"
+                return f"⚠️ AI hiện đang quá tải (Lỗi {resp.status}). Vui lòng thử lại sau ít phút!"
+            elif resp.status == 404:
+                CURRENT_MODEL = None
+                return f"⚠️ Lỗi API: Model {model_name} không tồn tại hoặc bị Google gỡ bỏ. Hệ thống sẽ tự động tìm model khác vào lần tới."
             else:
                 err = await resp.text()
                 user_histories[chat_id].pop()
@@ -402,7 +411,6 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "generationConfig": {"temperature": 0.2}
     }
 
-    # THÊM KHỐI TRY...EXCEPT Ở ĐÂY ĐỂ TRÁNH LỖI SYNTAX
     try:
         session = await get_http_session()
         async with session.post(url, json=payload, timeout=45) as resp:
@@ -446,11 +454,16 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 await update.message.reply_text(distribution_msg, parse_mode="Markdown")
             
-            # --- XỬ LÝ LỖI 503 Ở ĐÂY ---
-            elif resp.status == 503:
+            elif resp.status in [500, 503]:
                 CURRENT_MODEL = None  # Reset model
                 await update.message.reply_text(
-                    "⚠️ **Lỗi 503 (Quá tải):** Máy chủ Gemini hiện đang quá tải hoặc bảo trì. Quá trình report đã bị hủy để tránh mất dữ liệu. Bạn hãy đợi vài phút và gọi lại lệnh `/report` nhé.",
+                    f"⚠️ **Lỗi {resp.status} (Quá tải):** Máy chủ Gemini hiện đang bận. Quá trình report đã bị hủy để tránh mất dữ liệu. Bạn hãy đợi vài phút và gọi lại lệnh `/report` nhé.",
+                    parse_mode="Markdown"
+                )
+            elif resp.status == 404:
+                CURRENT_MODEL = None
+                await update.message.reply_text(
+                    f"⚠️ **Lỗi 404 (Không tìm thấy):** Model {model_name} không tồn tại hoặc đã bị gỡ. Bot sẽ tự động cập nhật model khác vào lần tới.",
                     parse_mode="Markdown"
                 )
             else:
@@ -459,6 +472,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(f"❌ Đã xảy ra lỗi hệ thống hoặc phân tích JSON: {str(e)}")
+
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
     if chat_id != ADMIN_CHAT_ID: return
