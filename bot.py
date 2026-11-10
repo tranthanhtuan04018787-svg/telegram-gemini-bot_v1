@@ -365,19 +365,20 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 summary = parsed_json.get("summary", "Không có tóm tắt.")
                 categories = parsed_json.get("categories", {})
 
-                # 4. Lưu Báo cáo tổng hợp
+               # 4. Lưu Báo cáo tổng hợp
                 report_text = f"\n\n## Báo cáo {days} ngày qua (Tạo ngày {get_vn_time()})\n**Tóm tắt:** {summary}\n"
                 await append_to_github_file("Bao_Cao_Tong_Hop.md", report_text)
 
                 # 5. Phân phối
-                distribution_msg = f"✅ **Đã phân tích Báo cáo {days} ngày!**\n\n📝 **Tóm tắt:** {summary}\n\n📂 **Phân bổ:**\n"
+                distribution_msg = f"Đã phân tích Báo cáo {days} ngày!\n\nTóm tắt: {summary}\n\nPhân bổ:\n"
                 for cat_file, items in categories.items():
                     if items:
                         formatted_items = "\n".join([f"- [ ] {item}" for item in items])
                         await append_to_github_file(cat_file, f"\n\n### Từ INPUT_BOT ngày {get_vn_time()}:\n{formatted_items}\n")
-                        distribution_msg += f"• `{cat_file}`: {len(items)} mục\n"
+                        distribution_msg += f"- {cat_file}: {len(items)} mục\n"
 
-                await update.message.reply_text(distribution_msg, parse_mode="Markdown")
+                # GỬI TIN NHẮN KHÔNG CÓ PARSE_MODE ĐỂ TRÁNH LỖI "Can't parse entities"
+                await update.message.reply_text(distribution_msg) 
             elif resp.status == 503:
                 CURRENT_MODEL = None
                 await update.message.reply_text("⚠️ API đang quá tải (503). Vui lòng thử lại sau.")
