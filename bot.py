@@ -140,10 +140,10 @@ async def save_note_to_github(note_content: str) -> tuple[bool, str]:
     file_path = "Inbox.md"
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
     
+   # Sử dụng 'token' thay cho 'Bearer' đối với GitHub Classic Token
     headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
     }
 
     timestamp = get_vn_time()
