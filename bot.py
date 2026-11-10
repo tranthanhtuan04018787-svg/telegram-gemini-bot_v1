@@ -5,6 +5,7 @@ import base64
 import aiohttp
 import json
 import re
+import time
 from aiohttp import web
 from telegram import Update
 from telegram.constants import ChatAction
@@ -109,6 +110,10 @@ async def get_http_session() -> aiohttp.ClientSession:
 MODEL_EXCLUDE = ("exp", "tts", "image", "live", "audio", "embedding", "robotics",
                  "omni", "imagen", "veo", "lyria", "thinking", "computer-use", "customtools")
 BAD_MODELS = set()  # model đã bị 404 -> không chọn lại nữa
+COOLDOWN = {}       # model bị 429 -> tạm nghỉ đến thời điểm (epoch)
+
+def _unavailable(name: str) -> bool:
+    return name in BAD_MODELS or COOLDOWN.get(name, 0) > time.time()
 FALLBACK_MODELS = ["models/gemini-flash-latest"]  # alias luôn trỏ tới flash mới nhất
 
 def _norm_model(name: str) -> str:
@@ -145,13 +150,13 @@ async def list_gemini_models() -> list:
 async def get_active_gemini_model():
     """Trả về tên model dùng được, hoặc None nếu mọi lựa chọn đều đã bị 404."""
     global CURRENT_MODEL
-    if GEMINI_MODEL_OVERRIDE and _norm_model(GEMINI_MODEL_OVERRIDE) not in BAD_MODELS:
+    if GEMINI_MODEL_OVERRIDE and not _unavailable(_norm_model(GEMINI_MODEL_OVERRIDE)):
         return _norm_model(GEMINI_MODEL_OVERRIDE)
-    if CURRENT_MODEL and CURRENT_MODEL not in BAD_MODELS:
+    if CURRENT_MODEL and not _unavailable(CURRENT_MODEL):
         return CURRENT_MODEL
 
     try:
-        names = [n for n in await list_gemini_models() if n not in BAD_MODELS]
+        names = [n for n in await list_gemini_models() if not _unavailable(n)]
         flash = [n for n in names if "flash" in n.lower()]
         pool = flash or names
         if pool:
@@ -162,12 +167,12 @@ async def get_active_gemini_model():
         logging.error(f"Lỗi khi fetch model: {type(e).__name__}: {e}")
 
     for fb in FALLBACK_MODELS:  # không cache, lần sau vẫn thử liệt kê lại
-        if fb not in BAD_MODELS:
+        if not _unavailable(fb):
             logging.warning(f"Dùng model dự phòng: {fb}")
             return fb
     return None
 
-async def gemini_generate(payload: dict, timeout: int = 30, max_attempts: int = 3):
+async def gemini_generate(payload: dict, timeout: int = 30, max_attempts: int = 4):
     """Gọi generateContent. Tự đổi model khi 404, tự retry khi 429/500/503.
     Trả về (status, data_json_hoac_None, err_text)."""
     global CURRENT_MODEL
@@ -189,7 +194,18 @@ async def gemini_generate(payload: dict, timeout: int = 30, max_attempts: int = 
                 BAD_MODELS.add(model)
                 CURRENT_MODEL = None
                 continue
-            if resp.status in (429, 500, 503):
+            if resp.status == 429:
+                m = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', err)
+                delay = float(m.group(1)) if m else 30.0
+                per_day = "PerDay" in err
+                logging.warning(f"429 từ {model}: {err[:400]}")
+                if not per_day and delay <= 15:
+                    await asyncio.sleep(delay + 1)   # chờ rồi thử lại chính model này
+                    continue
+                COOLDOWN[model] = time.time() + (3600 if per_day else max(delay, 30))
+                CURRENT_MODEL = None                  # lần sau thử model khác (quota tính riêng từng model)
+                continue
+            if resp.status in (500, 503):
                 await asyncio.sleep(2 * (attempt + 1))
                 continue
             return last
@@ -359,7 +375,9 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
             return bot_reply
 
         user_histories[chat_id].pop()  # luôn bỏ tin nhắn lỗi khỏi lịch sử
-        if status in (429, 500, 503):
+        if status == 429:
+            return "⚠️ Mình đang nhận quá nhiều yêu cầu, bạn vui lòng thử lại sau khoảng 1 phút nhé!"
+        if status in (500, 503):
             return f"⚠️ AI hiện đang quá tải (Lỗi {status}). Vui lòng thử lại sau ít phút!"
         if status == 404:
             return "⚠️ Hiện chưa tìm được model Gemini khả dụng. Mình đã báo anh Tuấn kiểm tra giúp."
@@ -510,7 +528,12 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text(distribution_msg, parse_mode="Markdown")
 
-        elif status in (429, 500, 503):
+        elif status == 429:
+            await update.message.reply_text(
+                "⚠️ **Lỗi 429 (Hết hạn mức Gemini):** API key đã vượt giới hạn (số request/phút, token/phút hoặc request/ngày) của mọi model bot thử. Chưa có gì bị ghi/xóa. Chi tiết từ Google:\n"
+                f"`{err_text[:350]}`"
+            )
+        elif status in (500, 503):
             await update.message.reply_text(
                 f"⚠️ **Lỗi {status} (Quá tải):** Máy chủ Gemini đang bận. Quá trình report đã bị hủy để tránh mất dữ liệu. Bạn đợi vài phút rồi gọi lại `/report` nhé.",
                 parse_mode="Markdown"
