@@ -415,33 +415,32 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 # 4. Lưu Báo cáo tổng hợp
                 report_text = f"\n\n## Báo cáo {days} ngày qua (Tạo ngày {get_vn_time()})\n**Tóm tắt:** {summary}\n"
-                await append_to_github_file("Bao_Cao_Tong_Hop.md", report_text)
+                save_report_ok = await append_to_github_file("Bao_Cao_Tong_Hop.md", report_text)
+                if not save_report_ok:
+                    await update.message.reply_text("❌ Lỗi: AI đã tổng hợp xong nhưng không thể ghi vào Bao_Cao_Tong_Hop.md trên GitHub (Có thể do xung đột file).")
+                    return # Dừng tiến trình, tránh làm mất dữ liệu
 
                 # 5. Phân phối vào các file mục tiêu
                 distribution_msg = f"✅ **Đã hoàn thành Báo cáo {days} ngày!**\n\n📌 **Tóm tắt:** {summary}\n\n📂 **Phân bổ:**\n"
                 for cat_file, items in categories.items():
                     if items:
                         formatted_items = "\n".join([f"- [ ] {item}" for item in items])
-                        await append_to_github_file(cat_file, f"\n\n### Từ INPUT_BOT ngày {get_vn_time()}:\n{formatted_items}\n")
-                        distribution_msg += f"- `{cat_file}`: {len(items)} mục\n"
+                        save_cat_ok = await append_to_github_file(cat_file, f"\n\n### Từ INPUT_BOT ngày {get_vn_time()}:\n{formatted_items}\n")
+                        if save_cat_ok:
+                            distribution_msg += f"- `{cat_file}`: {len(items)} mục\n"
+                        else:
+                            distribution_msg += f"- ❌ Lỗi lưu `{cat_file}`\n"
 
-                # 6. TỰ ĐỘNG DỌN DẸP / NÉN FILE INPUT_BOT.md (Làm sạch Inbox)
+                # 6. TỰ ĐỘNG DỌN DẸP / NÉN FILE INPUT_BOT.md
                 new_input_content = header_part + "".join(remaining_text_blocks)
-                await overwrite_github_file("INPUT_BOT.md", new_input_content, f"Clean up INPUT_BOT after report: {get_vn_time()}")
-                distribution_msg += f"\n🧹 *Đã dọn sạch các ghi chú đã xử lý khỏi INPUT_BOT.md!*"
+                save_clean_ok = await overwrite_github_file("INPUT_BOT.md", new_input_content, f"Clean up INPUT_BOT after report: {get_vn_time()}")
+                if save_clean_ok:
+                    distribution_msg += f"\n🧹 *Đã dọn sạch các ghi chú đã xử lý khỏi INPUT_BOT.md!*"
+                else:
+                    distribution_msg += f"\n⚠️ *Lỗi: Không thể xóa ghi chú cũ trong INPUT_BOT.md!*"
 
-                await update.message.reply_text(distribution_msg, parse_mode="Markdown") 
-            elif resp.status == 503:
-                CURRENT_MODEL = None
-                await update.message.reply_text("⚠️ API đang quá tải (503). Vui lòng thử lại sau.")
-            else:
-                err = await resp.text()
-                await update.message.reply_text(f"❌ Lỗi xử lý AI: {err[:150]}")
-    except json.JSONDecodeError:
-         await update.message.reply_text("❌ Lỗi: AI không trả về đúng form JSON.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Đã xảy ra lỗi: {str(e)}")
-
+                await update.message.reply_text(distribution_msg, parse_mode="Markdown")
+                
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
     if chat_id != ADMIN_CHAT_ID: return
