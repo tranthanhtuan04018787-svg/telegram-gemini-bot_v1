@@ -24,7 +24,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_CHAT_ID = str(os.getenv("ADMIN_CHAT_ID", "")).strip()
-GITHUB_REPO = os.getenv("GITHUB_REPO", "tranthantuan04018787-svg/Brain-2").strip()
+GITHUB_REPO = os.getenv("GITHUB_REPO", "tranthanhtuan04018787-svg/Brain-2").strip()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 SHEET_WEBHOOK_URL = os.getenv("SHEET_WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8080))
@@ -48,12 +48,121 @@ def get_vn_time() -> str:
     now = datetime.now(timezone.utc) + timedelta(hours=7)
     return now.strftime("%d/%m/%Y %H:%M:%S")
 
+def get_timestamp_id() -> str:
+    now = datetime.now(timezone.utc) + timedelta(hours=7)
+    return now.strftime("%Y%m%d_%H%M%S")
+
 async def get_http_session() -> aiohttp.ClientSession:
     global http_session
     if http_session is None or http_session.closed:
         connector = aiohttp.TCPConnector(limit=50, keepalive_timeout=60)
         http_session = aiohttp.ClientSession(connector=connector)
     return http_session
+
+async def append_to_input_md(entry_text: str) -> tuple[bool, str]:
+    """Ghi nối tiếp văn bản vào file INPUT.md trên GitHub."""
+    token = str(GITHUB_TOKEN or "").strip()
+    repo = str(GITHUB_REPO or "").strip()
+    session = await get_http_session()
+    
+    file_path = "INPUT.md"
+    url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "Telegram-Obsidian-Bot",
+    }
+
+    try:
+        sha = None
+        existing_text = ""
+        async with session.get(url, headers=headers, timeout=15) as resp:
+            if resp.status == 200:
+                file_info = await resp.json()
+                sha = file_info.get("sha")
+                raw_bytes = base64.b64decode(file_info.get("content", ""))
+                existing_text = raw_bytes.decode("utf-8", errors="ignore")
+            elif resp.status == 404:
+                existing_text = "# 📥 Hộp thư đến (INPUT)\n\n"
+            else:
+                err_body = await resp.text()
+                return False, f"Lỗi GET INPUT.md ({resp.status}): {err_body[:120]}"
+
+        new_text = existing_text + entry_text
+        encoded_content = base64.b64encode(new_text.encode("utf-8")).decode("utf-8")
+
+        payload = {
+            "message": f"update input: {get_vn_time()}",
+            "content": encoded_content,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        async with session.put(url, headers=headers, json=payload, timeout=20) as put_resp:
+            if put_resp.status in [200, 201]:
+                return True, "Thành công"
+            else:
+                err_body = await put_resp.text()
+                return False, f"Lỗi PUT INPUT.md ({put_resp.status}): {err_body[:120]}"
+    except Exception as e:
+        return False, f"Lỗi ngoại lệ INPUT.md: {str(e)}"
+
+async def upload_file_to_github_attachments(file_bytes: bytes, file_name: str) -> tuple[bool, str]:
+    """Tải file nhị phân (ảnh, tài liệu nhỏ) vào thư mục attachments/ trên GitHub."""
+    token = str(GITHUB_TOKEN or "").strip()
+    repo = str(GITHUB_REPO or "").strip()
+    session = await get_http_session()
+
+    url = f"https://api.github.com/repos/{repo}/contents/attachments/{file_name}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "Telegram-Obsidian-Bot",
+    }
+
+    encoded_content = base64.b64encode(file_bytes).decode("utf-8")
+    payload = {
+        "message": f"upload attachment: {file_name}",
+        "content": encoded_content,
+    }
+
+    try:
+        async with session.put(url, headers=headers, json=payload, timeout=30) as resp:
+            if resp.status in [200, 201]:
+                return True, file_name
+            else:
+                err_body = await resp.text()
+                return False, f"Lỗi tải attachments ({resp.status}): {err_body[:120]}"
+    except Exception as e:
+        return False, f"Lỗi ngoại lệ upload: {str(e)}"
+
+async def upload_to_drive_webhook(file_bytes: bytes, file_name: str) -> tuple[bool, str]:
+    """Gửi file lớn lên Google Drive qua Google Apps Script Webhook."""
+    if not SHEET_WEBHOOK_URL:
+        return False, "Chưa cấu hình biến SHEET_WEBHOOK_URL trên Render!"
+
+    session = await get_http_session()
+    base64_data = base64.b64encode(file_bytes).decode("utf-8")
+
+    payload = {
+        "action": "upload_drive",
+        "file_name": file_name,
+        "file_data": base64_data,
+        "time": get_vn_time(),
+    }
+
+    try:
+        async with session.post(SHEET_WEBHOOK_URL, json=payload, timeout=60) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                drive_link = data.get("file_url") or data.get("url", "")
+                if drive_link:
+                    return True, drive_link
+                return False, "Webhook không trả về URL file"
+            else:
+                return False, f"Webhook Drive báo lỗi ({resp.status})"
+    except Exception as e:
+        return False, f"Lỗi ngoại lệ Drive: {str(e)}"
 
 async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply: str):
     if not SHEET_WEBHOOK_URL:
@@ -71,67 +180,6 @@ async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply
             await resp.text()
     except Exception as e:
         logging.error(f"Lỗi ghi Google Sheet: {e}")
-
-async def save_note_to_github(note_content: str) -> tuple[bool, str]:
-    token = str(GITHUB_TOKEN or "").strip()
-    repo = str(GITHUB_REPO or "").strip()
-
-    if not token:
-        return False, "Thiếu biến GITHUB_TOKEN trên Render!"
-    if not repo:
-        return False, "Thiếu biến GITHUB_REPO trên Render!"
-
-    session = await get_http_session()
-    file_path = "Inbox.md"
-    url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
-    
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "Telegram-Obsidian-Bot",
-    }
-
-    timestamp = get_vn_time()
-    formatted_entry = f"\n- **[{timestamp}]**: {note_content}\n"
-
-    try:
-        sha = None
-        existing_text = ""
-        
-        async with session.get(url, headers=headers, timeout=15) as resp:
-            if resp.status == 200:
-                file_info = await resp.json()
-                sha = file_info.get("sha")
-                raw_bytes = base64.b64decode(file_info.get("content", ""))
-                existing_text = raw_bytes.decode("utf-8", errors="ignore")
-            elif resp.status == 404:
-                existing_text = "# 📥 Hộp thư đến (Inbox)\n\n"
-            elif resp.status == 401:
-                return False, "Lỗi 401: GITHUB_TOKEN bị sai hoặc đã bị thu hồi."
-            else:
-                return False, f"Lỗi GET ({resp.status}): {await resp.text()}"
-
-        new_text = existing_text + formatted_entry
-        encoded_content = base64.b64encode(new_text.encode("utf-8")).decode("utf-8")
-
-        payload = {
-            "message": f"note: {timestamp}",
-            "content": encoded_content,
-        }
-        if sha:
-            payload["sha"] = sha
-
-        async with session.put(url, headers=headers, json=payload, timeout=20) as put_resp:
-            if put_resp.status in [200, 201]:
-                return True, "Thành công"
-            elif put_resp.status == 404:
-                masked_token = f"...{token[-4:]}" if len(token) > 4 else "Lỗi"
-                return False, f"LỖI QUYỀN TRUY CẬP KHO (404):\n1. Tên kho đang kết nối: `{repo}` (Kiểm tra xem đúng 100% chưa)\n2. Token đang dùng kết thúc bằng: `{masked_token}` (Cần đảm bảo Token này đã được tích chọn quyền 'repo' trên GitHub)."
-            else:
-                err_body = await put_resp.text()
-                return False, f"Lỗi PUT ({put_resp.status}): {err_body[:100]}"
-    except Exception as e:
-        return False, f"Ngoại lệ: {str(e)}"
 
 async def call_gemini(chat_id: str, user_text: str) -> str:
     if chat_id not in user_histories:
@@ -173,78 +221,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if chat_id == ADMIN_CHAT_ID:
         msg = (
-            "Chào anh Tuấn! Em đã sẵn sàng kết nối Obsidian.\n\n"
-            "📌 **Lệnh sử dụng:**\n"
-            "• `/note <nội dung>`: Lưu ý tưởng ngay vào kho Obsidian (Inbox)\n"
-            "• Nhắn tin trực tiếp để trò chuyện cùng trợ lý AI."
-        )
-        await update.message.reply_text(msg, parse_mode="Markdown")
-    else:
-        await update.message.reply_text("Xin chào! Mình là trợ lý của anh Tuấn. Mình có thể giúp gì cho bạn?")
-
-async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id).strip()
-    
-    if chat_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("Bạn không có quyền sử dụng tính năng lưu ghi chú này.")
-        return
-
-    note_text = " ".join(context.args).strip()
-    if not note_text:
-        await update.message.reply_text("⚠️ Nhập nội dung sau lệnh! Ví dụ: `/note Ý tưởng mới`", parse_mode="Markdown")
-        return
-
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-    ok, debug_info = await save_note_to_github(note_text)
-
-    if ok:
-        await update.message.reply_text(f"✅ **Đã lưu vào Obsidian:**\n_{note_text}_", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(f"❌ **Lỗi chi tiết từ GitHub:**\n`{debug_info}`", parse_mode="Markdown")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    chat_id = str(update.effective_chat.id).strip()
-    sender_name = update.message.from_user.full_name
-
-    if ADMIN_CHAT_ID and chat_id != ADMIN_CHAT_ID:
-        report_msg = f"🔔 **Có tin nhắn mới tới Bot!**\n👤 Từ: {sender_name}\n💬 Nội dung: {user_text}"
-        asyncio.create_task(context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_msg))
-
-    asyncio.create_task(context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING))
-
-    try:
-        reply_content = await asyncio.wait_for(call_gemini(chat_id, user_text), timeout=45.0)
-        await update.message.reply_text(reply_content)
-        asyncio.create_task(log_to_sheet(chat_id, sender_name, user_text, reply_content))
-    except Exception as e:
-        await update.message.reply_text(f"Đã có lỗi xảy ra: {str(e)}")
-
-async def handle_ping(request):
-    return web.Response(text="Bot is live!")
-
-async def run_dummy_server():
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-
-async def main():
-    await run_dummy_server()
-
-    telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("note", note_cmd))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    await telegram_app.initialize()
-    await telegram_app.start()
-    await telegram_app.updater.start_polling(drop_pending_updates=True)
-
-    while True:
-        await asyncio.sleep(3600)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+            "Chào anh Tuấn! Trợ lý Obsidian đã sẵn sàng:\n\n"
+            "📌 **Các cách lưu dữ liệu:**\n"
+            "• `/note <nội dung>`: Lưu nhanh ghi chú văn bản vào INPUT.md\n"
+            "• **Gửi ảnh trực tiếp**: Tự lưu vào attachments/ và nhúng thẻ hiển thị ảnh\n"
+            "• **Gửi video/tệp (< 15MB)**: Tự động lưu vào GitHub Vault\n"
+            "• **Gửi file lớn
