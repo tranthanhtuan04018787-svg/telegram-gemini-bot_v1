@@ -302,7 +302,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Không thể đọc file INPUT_BOT.md hoặc file trống.")
         return
 
-   # 2. Lọc ghi chú (Đã nới lỏng thuật toán nhận diện)
+  # 2. Lọc ghi chú (Đã nới lỏng thuật toán nhận diện)
     now = datetime.now(timezone.utc) + timedelta(hours=7)
     cutoff_date = now - timedelta(days=days)
     
@@ -315,12 +315,20 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             note_date = datetime.strptime(date_str, "%d/%m/%Y").replace(tzinfo=timezone(timedelta(hours=7)))
             if note_date >= cutoff_date:
-                # Xóa sạch các ký tự thừa (như dấu *, dấu :, khoảng trắng) bị kẹt ở đầu câu
+                # Xóa sạch các ký tự thừa bị kẹt ở đầu câu
                 clean_content = re.sub(r"^[\*\s:]+", "", note_content).strip()
                 if clean_content:
                     filtered_notes.append(f"- {clean_content}")
         except ValueError:
             continue
+
+    # --- ĐÂY LÀ PHẦN CODE ĐÃ BỊ CẮT THIẾU LẦN TRƯỚC ---
+    if not filtered_notes:
+        await update.message.reply_text(f"⚠️ Không tìm thấy ghi chú nào trong {days} ngày qua.")
+        return
+
+    notes_text = "\n".join(filtered_notes)
+    # ---------------------------------------------------
     # 3. Gửi cho Gemini xử lý
     ai_prompt = f"""
     Bạn là trợ lý ảo quản lý dữ liệu. Dưới đây là các ghi chú tôi thu thập được trong {days} ngày qua:
