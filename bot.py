@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import base64
 import aiohttp
 from aiohttp import web
 from telegram import Update
@@ -23,6 +24,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_CHAT_ID = str(os.getenv("ADMIN_CHAT_ID", "")).strip()
+GITHUB_REPO = os.getenv("GITHUB_REPO", "tranthantuan04018787-svg/Brain-2").strip()
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 SHEET_WEBHOOK_URL = os.getenv("SHEET_WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8080))
 
@@ -32,10 +35,8 @@ if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
 user_histories = {}
 MAX_HISTORY = 4
 
-# Phiên kết nối toàn cục (Giúp giữ kết nối luôn mở, giảm 1s độ trễ mỗi tin nhắn)
 http_session: aiohttp.ClientSession = None
 
-# Ghim sẵn các model thực tế từ tài khoản của bạn để chạy ngay lập tức (0 giây dò tìm)
 cached_models = [
     "models/gemini-3.1-flash-lite",
     "models/gemini-3.1-flash-lite-preview",
@@ -57,8 +58,11 @@ def get_vn_time() -> str:
     now = datetime.now(timezone.utc) + timedelta(hours=7)
     return now.strftime("%d/%m/%Y %H:%M:%S")
 
+def get_vn_date() -> str:
+    now = datetime.now(timezone.utc) + timedelta(hours=7)
+    return now.strftime("%Y-%m-%d")
+
 async def get_http_session() -> aiohttp.ClientSession:
-    """Lấy phiên kết nối dùng chung, tự khởi tạo nếu chưa có."""
     global http_session
     if http_session is None or http_session.closed:
         connector = aiohttp.TCPConnector(limit=50, keepalive_timeout=60)
@@ -66,7 +70,6 @@ async def get_http_session() -> aiohttp.ClientSession:
     return http_session
 
 def score_model(model_id: str) -> tuple:
-    """Ưu tiên: 3.1-flash bản chính thức -> bản preview -> các dòng flash mới nhất."""
     m = model_id.lower()
     is_3_1_flash = 1 if ("3.1" in m and "flash" in m) else 0
     not_preview = 0 if ("preview" in m or "exp" in m) else 1
@@ -81,7 +84,6 @@ def score_model(model_id: str) -> tuple:
     return (is_3_1_flash, not_preview, is_flash, ver_score, not_lite)
 
 async def refresh_models_from_google() -> list:
-    """Cập nhật danh sách model từ Google (Chỉ chạy ngầm khi khởi động hoặc khi bị lỗi 404)."""
     global cached_models, active_model_name
     session = await get_http_session()
     list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
@@ -127,6 +129,61 @@ async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply
     except Exception as e:
         logging.error(f"Lỗi ghi Google Sheet: {e}")
 
+async def save_note_to_github(note_content: str) -> bool:
+    """Lưu ghi chú vào kho GitHub Brain-2 cho Obsidian."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        logging.error("Thiếu GITHUB_TOKEN hoặc GITHUB_REPO!")
+        return False
+
+    session = await get_http_session()
+    # Lưu vào file 0. Inbox/Inbox.md trong vault
+    file_path = "0.%20Inbox/Inbox.md"
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    timestamp = get_vn_time()
+    formatted_entry = f"\n- **[{timestamp}]**: {note_content}\n"
+
+    try:
+        # 1. Kiểm tra xem file đã tồn tại trên GitHub chưa để lấy SHA
+        sha = None
+        existing_text = ""
+        async with session.get(url, headers=headers, timeout=15) as resp:
+            if resp.status == 200:
+                file_info = await resp.json()
+                sha = file_info.get("sha")
+                raw_bytes = base64.b64decode(file_info.get("content", ""))
+                existing_text = raw_bytes.decode("utf-8", errors="ignore")
+            elif resp.status == 404:
+                existing_text = "# 📥 Hộp thư đến (Inbox)\n\n"
+
+        # 2. Gộp nội dung mới vào file
+        new_text = existing_text + formatted_entry
+        encoded_content = base64.b64encode(new_text.encode("utf-8")).decode("utf-8")
+
+        payload = {
+            "message": f"note: {timestamp}",
+            "content": encoded_content,
+            "branch": "main",
+        }
+        if sha:
+            payload["sha"] = sha
+
+        # 3. Đẩy nội dung cập nhật lên nhánh main
+        async with session.put(url, headers=headers, json=payload, timeout=20) as put_resp:
+            if put_resp.status in [200, 201]:
+                return True
+            else:
+                err_text = await put_resp.text()
+                logging.error(f"Lỗi GitHub API ({put_resp.status}): {err_text}")
+                return False
+    except Exception as e:
+        logging.error(f"Lỗi kết nối GitHub: {e}")
+        return False
+
 async def call_gemini(chat_id: str, user_text: str) -> str:
     global active_model_name, cached_models
     if chat_id not in user_histories:
@@ -164,7 +221,6 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
                         bot_reply = gen_data["candidates"][0]["content"]["parts"][0]["text"]
                         user_histories[chat_id].append({"role": "model", "parts": [{"text": bot_reply}]})
                         active_model_name = model_path
-                        # Đưa model vừa chạy thành công lên vị trí đầu tiên để tin nhắn sau không phải dò lại
                         if idx > 0 and chosen_model in cached_models:
                             cached_models.remove(chosen_model)
                             cached_models.insert(0, chosen_model)
@@ -172,7 +228,6 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
                     except (KeyError, IndexError):
                         continue
                 elif gen_resp.status == 404:
-                    # Nếu tương lai model này bị Google xóa -> Tự gọi cập nhật ngầm và chuyển sang model kế tiếp
                     asyncio.create_task(refresh_models_from_google())
                     continue
                 elif gen_resp.status in [429, 503]:
@@ -191,7 +246,39 @@ async def call_gemini(chat_id: str, user_text: str) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
     user_histories[chat_id] = []
-    await update.message.reply_text("Xin chào! Mình là trợ lý của anh Tuấn. Mình có thể giúp gì cho bạn?")
+    
+    if chat_id == ADMIN_CHAT_ID:
+        msg = (
+            "Chào anh Tuấn! Em đã sẵn sàng kết nối Obsidian.\n\n"
+            "📌 **Các lệnh dành riêng cho anh:**\n"
+            "• `/note <nội dung>`: Lưu ý tưởng ngay vào kho Obsidian (Inbox)\n"
+            "• `/model`: Xem model AI đang hoạt động\n"
+            "• Hoặc nhắn trực tiếp để trò chuyện với trợ lý AI."
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("Xin chào! Mình là trợ lý của anh Tuấn. Mình có thể giúp gì cho bạn?")
+
+async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id).strip()
+    
+    # Kiểm tra phân quyền: Chỉ có Admin mới được lưu note vào Obsidian
+    if chat_id != ADMIN_CHAT_ID:
+        await update.message.reply_text("Bạn không có quyền sử dụng tính năng lưu ghi chú này.")
+        return
+
+    note_text = " ".join(context.args).strip()
+    if not note_text:
+        await update.message.reply_text("⚠️ Vui lòng nhập nội dung sau lệnh! Ví dụ:\n`/note Hôm nay học xong Git`", parse_mode="Markdown")
+        return
+
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    success = await save_note_to_github(note_text)
+
+    if success:
+        await update.message.reply_text(f"✅ **Đã lưu vào Obsidian:**\n_{note_text}_", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Lưu vào GitHub thất bại. Vui lòng kiểm tra lại GITHUB_TOKEN hoặc quyền ghi repo trên Render.")
 
 async def check_model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top_models = "\n".join([f"• `{m}`" for m in cached_models[:6]])
@@ -206,7 +293,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
     sender_name = update.message.from_user.full_name
 
-    # Chạy song song việc báo cáo cho Admin và việc gõ chữ để không làm trễ phản hồi
     if ADMIN_CHAT_ID and chat_id != ADMIN_CHAT_ID:
         report_msg = f"🔔 **Có tin nhắn mới tới Bot!**\n👤 Từ: {sender_name}\n💬 Nội dung: {user_text}"
         asyncio.create_task(context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=report_msg))
@@ -235,11 +321,11 @@ async def run_dummy_server():
 
 async def main():
     await run_dummy_server()
-    # Khởi tạo sẵn kết nối và đồng bộ danh sách model ngay lúc bật máy chủ (trước khi khách chat)
     await refresh_models_from_google()
 
     telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("note", note_cmd))
     telegram_app.add_handler(CommandHandler("model", check_model_cmd))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
