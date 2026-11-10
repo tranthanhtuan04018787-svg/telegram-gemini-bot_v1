@@ -302,36 +302,36 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Không thể đọc file INPUT_BOT.md hoặc file trống.")
         return
 
- # 2. Lọc ghi chú (Thuật toán cắt chuỗi tuyệt đối - Bỏ qua mọi lỗi định dạng)
-    now = datetime.now(timezone.utc) + timedelta(hours=7)
-    cutoff_date = now - timedelta(days=days)
+# 2. Lọc ghi chú (Khắc phục triệt để lỗi lệch múi giờ Python)
+    # Lấy giờ VN hiện tại, xóa bỏ hệ tham chiếu múi giờ để Python không tự trừ đi 7 tiếng
+    now_vn = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=7)
     
-    # Dùng cụm [Ngày Giờ] làm vách ngăn để chặt file thành các mảng dữ liệu
-    parts = re.split(r'\[(\d{2}/\d{2}/\d{4})\s\d{2}:\d{2}:\d{2}\]', raw_content)
+    # Lùi lại số ngày và đưa về 00:00:00 để quét trọn vẹn tất cả ghi chú của ngày hôm đó
+    cutoff_date = (now_vn - timedelta(days=days)).replace(hour=0, minute=0, second=0)
+
+    # Chẻ chuỗi và "bắt" luôn cả Ngày lẫn Giờ (thay vì chỉ bắt ngày như trước)
+    parts = re.split(r'\[(\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2})\]', raw_content)
 
     filtered_notes = []
-    # parts[1] là ngày, parts[2] là nội dung, parts[3] lại là ngày...
     for i in range(1, len(parts), 2):
         date_str = parts[i]
         content = parts[i+1]
         try:
-            note_date = datetime.strptime(date_str, "%d/%m/%Y").replace(tzinfo=timezone(timedelta(hours=7)))
+            # So sánh chính xác thời gian (không bị ảnh hưởng bởi múi giờ)
+            note_date = datetime.strptime(date_str, "%d/%m/%Y %H:%M:%S")
             if note_date >= cutoff_date:
-                # Gọt sạch các ký tự rác (dấu 2 chấm, gạch ngang, khoảng trắng) kẹt ở ngay đầu câu
-                clean_content = re.sub(r"^[\*\s:\-]+", "", content).strip()
+                # Dọn sạch các ký tự rác (*, :, -, chấm tròn, khoảng trắng)
+                clean_content = re.sub(r"^[\*\s:\-•]+", "", content).strip()
                 if clean_content:
                     filtered_notes.append(f"- {clean_content}")
         except Exception:
             continue
 
     if not filtered_notes:
-        await update.message.reply_text(f"⚠️ Không tìm thấy ghi chú nào trong {days} ngày qua.")
+        await update.message.reply_text(f"⚠️ Không tìm thấy ghi chú nào từ {cutoff_date.strftime('%d/%m/%Y')}.")
         return
 
-    notes_text = "\n".join(filtered_notes)
-
-    notes_text = "\n".join(filtered_notes)
-    # ---------------------------------------------------
+    notes_text = "\n".join(filtered_notes)-
     # 3. Gửi cho Gemini xử lý
     ai_prompt = f"""
     Bạn là trợ lý ảo quản lý dữ liệu. Dưới đây là các ghi chú tôi thu thập được trong {days} ngày qua:
