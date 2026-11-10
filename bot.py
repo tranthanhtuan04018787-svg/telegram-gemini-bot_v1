@@ -129,16 +129,16 @@ async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply
     except Exception as e:
         logging.error(f"Lỗi ghi Google Sheet: {e}")
 
-async def save_note_to_github(note_content: str) -> bool:
-    """Lưu ghi chú vào kho GitHub Brain-2 cho Obsidian."""
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        logging.error("Thiếu GITHUB_TOKEN hoặc GITHUB_REPO!")
-        return False
+async def save_note_to_github(note_content: str) -> tuple[bool, str]:
+    """Lưu ghi chú và trả về chi tiết phản hồi để gỡ lỗi."""
+    if not GITHUB_TOKEN:
+        return False, "Thiếu biến GITHUB_TOKEN trên Render!"
+    if not GITHUB_REPO:
+        return False, "Thiếu biến GITHUB_REPO trên Render!"
 
     session = await get_http_session()
-    
-    # 1. Đường dẫn tệp chuẩn trong vault (không dùng %20)
-    file_path = "0. Inbox/Inbox.md"
+    # Lưu trực tiếp vào Inbox.md ở thư mục gốc để loại trừ lỗi đường dẫn thư mục
+    file_path = "Inbox.md"
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
     
     headers = {
@@ -154,7 +154,7 @@ async def save_note_to_github(note_content: str) -> bool:
         sha = None
         existing_text = ""
         
-        # 2. Kiểm tra xem file đã tồn tại trên nhánh main chưa
+        # 1. Kiểm tra file cũ trên GitHub
         async with session.get(f"{url}?ref=main", headers=headers, timeout=15) as resp:
             if resp.status == 200:
                 file_info = await resp.json()
@@ -164,10 +164,10 @@ async def save_note_to_github(note_content: str) -> bool:
             elif resp.status == 404:
                 existing_text = "# 📥 Hộp thư đến (Inbox)\n\n"
             else:
-                err_text = await resp.text()
-                logging.error(f"Lỗi kiểm tra file GitHub ({resp.status}): {err_text}")
+                err_body = await resp.text()
+                return False, f"Lỗi GET ({resp.status}): {err_body[:180]}"
 
-        # 3. Gộp nội dung và mã hóa base64
+        # 2. Chuẩn bị nội dung mã hóa Base64
         new_text = existing_text + formatted_entry
         encoded_content = base64.b64encode(new_text.encode("utf-8")).decode("utf-8")
 
@@ -179,17 +179,34 @@ async def save_note_to_github(note_content: str) -> bool:
         if sha:
             payload["sha"] = sha
 
-        # 4. Ghi đè/Tạo mới nội dung lên GitHub
+        # 3. Ghi file lên nhánh main
         async with session.put(url, headers=headers, json=payload, timeout=20) as put_resp:
             if put_resp.status in [200, 201]:
-                return True
+                return True, "Thành công"
             else:
-                err_text = await put_resp.text()
-                logging.error(f"Lỗi PUT GitHub API ({put_resp.status}): {err_text}")
-                return False
+                err_body = await put_resp.text()
+                return False, f"Lỗi PUT ({put_resp.status}): {err_body[:180]}"
     except Exception as e:
-        logging.error(f"Ngoại lệ kết nối GitHub: {e}")
-        return False
+        return False, f"Ngoại lệ kết nối: {str(e)}"
+
+async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id).strip()
+    if chat_id != ADMIN_CHAT_ID:
+        await update.message.reply_text("Bạn không có quyền thực hiện lệnh này.")
+        return
+
+    note_text = " ".join(context.args).strip()
+    if not note_text:
+        await update.message.reply_text("⚠️ Nhập nội dung sau lệnh! Ví dụ: `/note Kiểm tra`", parse_mode="Markdown")
+        return
+
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    ok, debug_info = await save_note_to_github(note_text)
+
+    if ok:
+        await update.message.reply_text(f"✅ **Đã lưu vào Obsidian:**\n_{note_text}_", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"❌ **Lỗi chi tiết từ GitHub:**\n`{debug_info}`", parse_mode="Markdown")
 
 async def call_gemini(chat_id: str, user_text: str) -> str:
     global active_model_name, cached_models
