@@ -5,7 +5,6 @@ import base64
 import aiohttp
 import json
 import re
-import time
 from aiohttp import web
 from telegram import Update
 from telegram.constants import ChatAction
@@ -41,11 +40,6 @@ GEMINI_API_BASE = "https" + "://generativelanguage.googleapis.com/v1beta"
 if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY:
     raise ValueError("Thiếu biến môi trường TELEGRAM_BOT_TOKEN hoặc GEMINI_API_KEY!")
 
-# Gửi API key qua header (không nhét vào URL để khỏi lộ trong log/thông báo lỗi)
-GEMINI_HEADERS = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
-# Tuỳ chọn: ép dùng 1 model cụ thể, ví dụ GEMINI_MODEL=gemini-flash-latest
-GEMINI_MODEL_OVERRIDE = os.getenv("GEMINI_MODEL", "").strip()
-
 # 3. BIẾN TOÀN CỤC & PROMPT
 user_histories = {}
 MAX_HISTORY = 4
@@ -60,32 +54,29 @@ Nếu họ hỏi Tuấn đâu, hãy nói rằng anh Tuấn đang bận chút vi�
 Tuyệt đối không nhận mình là AI do Google tạo ra.
 """
 
-# System Instruction chuyên biệt dành riêng cho việc xử lý / report Second Brain
+# System Instruction nâng cấp: Hỗ trợ tạo Micro-Notes độc lập và phân loại chuyên sâu
 SECOND_BRAIN_SYSTEM_INSTRUCTION = """
 Bạn là một Senior Knowledge Architect & Obsidian Vault Engineer chuyên nghiệp. 
-Nhiệm vụ của bạn là tiếp nhận các ghi chú thô từ Inbox, biên tập, hệ thống hóa và phân loại chúng vào các tệp mục tiêu (Cong_Viec.md, Y_Tuong.md, Kien_Thuc.md, Tai_Chinh.md, Khac.md).
+Nhiệm vụ của bạn là tiếp nhận các ghi chú thô từ Inbox, biên tập, hệ thống hóa và phân loại chúng vào hệ thống Second Brain.
 
-### 🧠 QUY TẮC XỬ LÝ NỘI DUNG CHI TIẾT & MỞ RỘNG TỪ KHÓA:
-1. **CHỐNG TÓM TẮT CỤT LỦN:** Khi gặp ghi chú có cấu trúc chi tiết (ví dụ như Zettelkasten gồm nguồn gốc, triết lý, ứng dụng), tuyệt đối không được rút gọn thành một dòng tiêu đề trắng. 
-2. **BẢO TOÀN & KHAI THÁC TRI THỨC:** Những khái niệm cốt lõi được bọc link mà có nội dung rõ ràng từ inbox, hãy trích xuất và đưa toàn bộ nội dung chi tiết đó gắn liền vào ngay dưới tên từ khóa/khái niệm được bọc link.
-3. **CẤU TRÚC RÕ RÀNG:** Trình bày theo dạng khối kiến thức độc lập (có tiêu đề liên kết, kèm theo các gạch đầu dòng ý con về bối cảnh, định nghĩa, thông số) để sẵn sàng hình thành một trang tri thức hoàn chỉnh.
-
-### 🔗 QUY TẮC BỌC LINK [[ ]] VÀ ĐIỀU HƯỚNG:
-- Bọc cú pháp `[[Từ khóa]]` cho các thực thể quan trọng (tên phương pháp, công cụ, khái niệm cốt lõi như [[Phương pháp Zettelkasten]], [[RoamResearch]], [[Niklas Luhmann]]).
-- Đảm bảo các nội dung giá trị từ inbox được bám sát vào đúng từ khóa đó thay vì bị trôi đi hay cô lập.
+### 🧠 QUY TẮC XỬ LÝ NỘI DUNG CHI TIẾT & TẠO MICRO-NOTES:
+1. **TẠO TRANG RIÊNG CHO KHÁI NIỆM CỐT LÕI (Micro-Notes):** Khi gặp các khái niệm, phương pháp, công cụ quan trọng có nội dung rõ ràng từ inbox (ví dụ: [[Phương pháp Zettelkasten]], [[RoamResearch]]...), hãy tách riêng và đưa vào phần `micro_notes`. Mỗi micro-note sẽ trở thành một tệp `.md` độc lập (ví dụ: khóa là `"Phương pháp Zettelkasten.md"`), nội dung bên trong phải trình bày đầy đủ chi tiết (nguồn gốc, triết lý, ứng dụng...) theo định dạng Markdown chuẩn, tuyệt đối không để trống.
+2. **PHÂN LOẠI DANH MỤC THÔNG THƯỜNG:** Các nội dung công việc, ý tưởng ngắn gọn, sự vụ hàng ngày không cấu thành một chủ đề nghiên cứu lớn thì phân phối vào các tệp danh mục chung (`Cong_Viec.md`, `Y_Tuong.md`, `Kien_Thuc.md`, `Tai_Chinh.md`, `Khac.md`).
+3. **BẢO TOÀN TRỌN VẸN TRI THỨC:** Giữ lại toàn bộ thông số, đoạn code, ví dụ thực tế, bối cảnh. Kiến thức phải được tinh chỉnh mạch lạc, sắc sảo hơn.
 
 ### 🛑 QUY ĐỊNH ĐẦU RA (OUTPUT SCHEMA):
 - BẮT BUỘC TRẢ VỀ ĐÚNG CHUẨN JSON HỢP LỆ (Valid JSON).
 - TUYỆT ĐỐI KHÔNG bọc JSON trong các thẻ markdown như ```json hoặc ```.
-- Mỗi phần tử trong mảng categories có thể chứa nhiều dòng định dạng Markdown (xuống dòng bằng ký tự ẩn `\n`).
 Cấu trúc JSON bắt buộc:
 {
-  "summary": "Tóm tắt ngắn gọn bức tranh tổng quan...",
+  "summary": "Tóm tắt ngắn gọn bức tranh tổng quan sự kiện trong kỳ...",
+  "micro_notes": {
+    "Phương pháp Zettelkasten.md": "# Phương pháp Zettelkasten\n- **Nguồn gốc**: ...\n- **Triết lý**: ...",
+    "Tên_File_Khác.md": "# Tiêu đề\n- Nội dung chi tiết..."
+  },
   "categories": {
-    "Kien_Thuc.md": [
-      "### [[Phương pháp Zettelkasten]]\n- **Nguồn gốc**: Được phát triển bởi Niklas Luhmann, giúp ông tạo ra khối lượng tác phẩm đồ sộ nhờ hệ thống thẻ đánh chỉ mục phân nhánh.\n- **Triết lý**: Mô phỏng mạng lưới thần kinh của não bộ, nơi các ý tưởng không tồn tại độc lập mà kết nối với nhau.\n- **Ứng dụng hiện đại**: Các phần mềm như [[RoamResearch]] đã hiện thực hóa phương pháp này thông qua tính năng backlink..."
-    ],
-    "Cong_Viec.md": ["Nội dung công việc khác..."]
+    "Cong_Viec.md": ["Nội dung công việc ngắn..."],
+    "Kien_Thuc.md": ["Kiến thức nhỏ lẻ khác..."]
   }
 }
 """
@@ -106,120 +97,35 @@ async def get_http_session() -> aiohttp.ClientSession:
         http_session = aiohttp.ClientSession(connector=connector)
     return http_session
 
-# Các model KHÔNG dùng để chat văn bản
-MODEL_EXCLUDE = ("exp", "tts", "image", "live", "audio", "embedding", "robotics",
-                 "omni", "imagen", "veo", "lyria", "thinking", "computer-use", "customtools")
-BAD_MODELS = set()  # model đã bị 404 -> không chọn lại nữa
-COOLDOWN = {}       # model bị 429 -> tạm nghỉ đến thời điểm (epoch)
-
-def _unavailable(name: str) -> bool:
-    return name in BAD_MODELS or COOLDOWN.get(name, 0) > time.time()
-FALLBACK_MODELS = ["models/gemini-flash-latest"]  # alias luôn trỏ tới flash mới nhất
-
-def _norm_model(name: str) -> str:
-    return name if name.startswith("models/") else f"models/{name}"
-
-def _model_rank(name: str):
-    n = name.lower()
-    m = re.search(r"gemini-(\d+(?:\.\d+)?)-flash", n)
-    version = tuple(int(x) for x in m.group(1).split(".")) if m else (0,)
-    # Ưu tiên: bản ổn định > preview, không lite > lite, version cao nhất, tên ngắn
-    return ("preview" not in n, "lite" not in n, version, -len(n))
-
-async def list_gemini_models() -> list:
-    session = await get_http_session()
-    names, token = [], None
-    for _ in range(10):  # phân trang (mặc định API chỉ trả 50 model/trang)
-        url = f"{GEMINI_API_BASE}/models?pageSize=1000"
-        if token: url += f"&pageToken={token}"
-        async with session.get(url, headers=GEMINI_HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status != 200:
-                logging.error(f"List models lỗi {resp.status}: {(await resp.text())[:200]}")
-                break
-            data = await resp.json()
-        for m in data.get("models", []):
-            name = m.get("name", "")
-            if ("generateContent" in m.get("supportedGenerationMethods", [])
-                    and name.startswith("models/gemini-")
-                    and not any(x in name for x in MODEL_EXCLUDE)):
-                names.append(name)
-        token = data.get("nextPageToken")
-        if not token: break
-    return names
-
-async def get_active_gemini_model():
-    """Trả về tên model dùng được, hoặc None nếu mọi lựa chọn đều đã bị 404."""
+async def get_active_gemini_model() -> str:
     global CURRENT_MODEL
-    if GEMINI_MODEL_OVERRIDE and not _unavailable(_norm_model(GEMINI_MODEL_OVERRIDE)):
-        return _norm_model(GEMINI_MODEL_OVERRIDE)
-    if CURRENT_MODEL and not _unavailable(CURRENT_MODEL):
+    if CURRENT_MODEL:
         return CURRENT_MODEL
 
+    url = f"{GEMINI_API_BASE}/models?key={GEMINI_API_KEY}"
     try:
-        names = [n for n in await list_gemini_models() if not _unavailable(n)]
-        flash = [n for n in names if "flash" in n.lower()]
-        pool = flash or names
-        if pool:
-            CURRENT_MODEL = max(pool, key=_model_rank)
-            logging.info(f"✅ Đã chọn model: {CURRENT_MODEL}")
-            return CURRENT_MODEL
-    except Exception as e:
-        logging.error(f"Lỗi khi fetch model: {type(e).__name__}: {e}")
-
-    for fb in FALLBACK_MODELS:  # không cache, lần sau vẫn thử liệt kê lại
-        if not _unavailable(fb):
-            logging.warning(f"Dùng model dự phòng: {fb}")
-            return fb
-    return None
-
-async def gemini_generate(payload: dict, timeout: int = 30, max_attempts: int = 4):
-    """Gọi generateContent. Tự đổi model khi 404, tự retry khi 429/500/503.
-    Trả về (status, data_json_hoac_None, err_text)."""
-    global CURRENT_MODEL
-    session = await get_http_session()
-    last = (404, None, "Không tìm được model Gemini khả dụng.")
-    for attempt in range(max_attempts):
-        model = await get_active_gemini_model()
-        if not model:
-            return last
-        url = f"{GEMINI_API_BASE}/{model}:generateContent"
-        async with session.post(url, headers=GEMINI_HEADERS, json=payload,
-                                timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+        session = await get_http_session()
+        async with session.get(url, timeout=15) as resp:
             if resp.status == 200:
-                return 200, await resp.json(), ""
-            err = await resp.text()
-            last = (resp.status, None, err)
-            if resp.status == 404:
-                logging.warning(f"Model {model} trả 404 -> loại khỏi danh sách, chọn model khác")
-                BAD_MODELS.add(model)
-                CURRENT_MODEL = None
-                continue
-            if resp.status == 429:
-                m = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', err)
-                delay = float(m.group(1)) if m else 30.0
-                per_day = "PerDay" in err
-                logging.warning(f"429 từ {model}: {err[:400]}")
-                if not per_day and delay <= 15:
-                    await asyncio.sleep(delay + 1)   # chờ rồi thử lại chính model này
-                    continue
-                COOLDOWN[model] = time.time() + (3600 if per_day else max(delay, 30))
-                CURRENT_MODEL = None                  # lần sau thử model khác (quota tính riêng từng model)
-                continue
-            if resp.status in (500, 503):
-                await asyncio.sleep(2 * (attempt + 1))
-                continue
-            return last
-    return last
-
-def extract_gemini_text(data: dict) -> str:
-    cands = data.get("candidates") or []
-    if not cands:
-        raise ValueError(f"Gemini không trả kết quả (promptFeedback={data.get('promptFeedback')})")
-    parts = (cands[0].get("content") or {}).get("parts") or []
-    text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
-    if not text:
-        raise ValueError(f"Gemini trả về rỗng (finishReason={cands[0].get('finishReason')})")
-    return text
+                data = await resp.json()
+                valid_models = [m["name"] for m in data.get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
+                flash_models = [m for m in valid_models if "flash" in m.lower()]
+                
+                if flash_models:
+                    preferred = [m for m in flash_models if "3.1-flash-lite" in m]
+                    CURRENT_MODEL = preferred[0] if preferred else flash_models[0]
+                elif valid_models:
+                    CURRENT_MODEL = valid_models[0]
+                else:
+                    CURRENT_MODEL = "models/gemini-1.5-flash"
+                
+                logging.info(f"✅ Đã tự động chọn Model: {CURRENT_MODEL}")
+                return CURRENT_MODEL
+            else:
+                return "models/gemini-1.5-flash"
+    except Exception as e:
+        logging.error(f"Lỗi lấy danh sách model: {e}")
+        return "models/gemini-1.5-flash"
 
 # 5. CÁC HÀM XỬ LÝ GITHUB VÀ GOOGLE DRIVE
 async def read_github_file(file_path: str) -> str:
@@ -355,37 +261,40 @@ async def log_to_sheet(chat_id: str, sender_name: str, user_text: str, bot_reply
         logging.error(f"Lỗi ghi Google Sheet: {e}")
 
 async def call_gemini(chat_id: str, user_text: str) -> str:
+    global CURRENT_MODEL
     if chat_id not in user_histories: user_histories[chat_id] = []
     user_histories[chat_id].append({"role": "user", "parts": [{"text": user_text}]})
     if len(user_histories[chat_id]) > MAX_HISTORY: user_histories[chat_id] = user_histories[chat_id][-MAX_HISTORY:]
 
+    model_name = await get_active_gemini_model()
+    url = f"{GEMINI_API_BASE}/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    
+    headers = {"Content-Type": "application/json"}
     dynamic_prompt = SYSTEM_PROMPT + f"\n\n[Thời gian]: {get_vn_time()} (Giờ VN)."
     payload = {
         "systemInstruction": {"parts": [{"text": dynamic_prompt}]},
         "contents": user_histories[chat_id],
-        # Model dòng 2.5/3.x có "thinking" ăn vào quota token -> 600 dễ bị cắt, trả về rỗng
-        "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.7},
+        "generationConfig": {"maxOutputTokens": 600, "temperature": 0.7},
     }
 
     try:
-        status, data, err = await gemini_generate(payload, timeout=20)
-        if status == 200:
-            bot_reply = extract_gemini_text(data)
-            user_histories[chat_id].append({"role": "model", "parts": [{"text": bot_reply}]})
-            return bot_reply
-
-        user_histories[chat_id].pop()  # luôn bỏ tin nhắn lỗi khỏi lịch sử
-        if status == 429:
-            return "⚠️ Mình đang nhận quá nhiều yêu cầu, bạn vui lòng thử lại sau khoảng 1 phút nhé!"
-        if status in (500, 503):
-            return f"⚠️ AI hiện đang quá tải (Lỗi {status}). Vui lòng thử lại sau ít phút!"
-        if status == 404:
-            return "⚠️ Hiện chưa tìm được model Gemini khả dụng. Mình đã báo anh Tuấn kiểm tra giúp."
-        return f"⚠️ Lỗi AI ({status}): {err[:200]}"
+        session = await get_http_session()
+        async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                bot_reply = data["candidates"][0]["content"]["parts"][0]["text"]
+                user_histories[chat_id].append({"role": "model", "parts": [{"text": bot_reply}]})
+                return bot_reply
+            elif resp.status == 503:
+                CURRENT_MODEL = None
+                return "⚠️ AI hiện đang quá tải (Lỗi 503). Vui lòng thử lại sau ít phút!"
+            else:
+                err = await resp.text()
+                user_histories[chat_id].pop()
+                return f"⚠️ Lỗi AI ({resp.status}): {err[:200]}"
     except Exception as e:
         user_histories[chat_id].pop()
-        logging.exception("call_gemini lỗi")
-        return f"❌ Lỗi xử lý: {type(e).__name__}"
+        return f"❌ Lỗi mạng: {str(e)}"
 
 # 7. CÁC LỆNH (COMMANDS)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -397,7 +306,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Chào anh Tuấn! Trợ lý Obsidian đã sẵn sàng:\n\n"
             "📌 **Các cách lưu dữ liệu:**\n"
             "• `/note <nội dung>`: Lưu nhanh ghi chú vào INPUT_BOT.md\n"
-            "• `/report <số ngày>`: AI tổng hợp, phân loại và dọn sạch Inbox\n"
+            "• `/report <số ngày>`: AI tổng hợp, tạo Micro-Notes và dọn sạch Inbox\n"
             "• **Gửi ảnh trực tiếp**: Tự lưu vào attachments/\n"
             "• **Gửi video/tệp (< 15MB)**: Tự động lưu vào GitHub Vault\n"
             "• **Gửi file lớn (> 15MB)**: Tự đẩy lên Google Drive"
@@ -434,7 +343,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args[0].isdigit():
         days = int(context.args[0])
 
-    await update.message.reply_text(f"⏳ AI đang đọc, phân tích và dọn dẹp dữ liệu {days} ngày qua...")
+    await update.message.reply_text(f"⏳ AI đang đọc, phân tích, tạo Micro-Notes và dọn dẹp dữ liệu {days} ngày qua...")
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     # 1. Đọc file
@@ -443,16 +352,14 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Không thể đọc file INPUT_BOT.md hoặc file trống.")
         return
 
-    # 2. Lọc ghi chú và giữ lại các ghi chú cũ chưa đến kỳ hạn report (để không làm mất dữ liệu)
+    # 2. Lọc ghi chú theo khoảng thời gian
     now_vn = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=7)
     cutoff_date = (now_vn - timedelta(days=days)).replace(hour=0, minute=0, second=0)
 
     parts = re.split(r'\[(\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2})\]', raw_content)
 
     filtered_notes = []
-    remaining_text_blocks = [] # Lưu trữ các phần ghi chú nằm ngoài khoảng thời gian report để giữ lại
-    
-    # Lấy phần tiêu đề gốc của file (nếu có)
+    remaining_text_blocks = []
     header_part = parts[0] if len(parts) > 0 else "# 📂 INPUT_BOT\n\n"
 
     for i in range(1, len(parts), 2):
@@ -466,7 +373,6 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if clean_content:
                     filtered_notes.append(f"- {clean_content}")
             else:
-                # Giữ lại các ghi chú cũ hơn mốc thời gian report
                 remaining_text_blocks.append(block_full)
         except Exception:
             remaining_text_blocks.append(block_full)
@@ -478,76 +384,86 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     notes_text = "\n".join(filtered_notes)
 
-    # 3. Gửi cho Gemini xử lý (Áp dụng systemInstruction chuyên biệt)
-    ai_prompt = f"Dưới đây là các ghi chú tôi thu thập được trong {days} ngày qua:\n{notes_text}\n\nHãy phân tích, tóm tắt và phân loại theo đúng định dạng JSON đã quy định."
+    # 3. Gửi cho Gemini xử lý
+    ai_prompt = f"Dưới đây là các ghi chú tôi thu thập được trong {days} ngày qua:\n{notes_text}\n\nHãy phân tích, tạo micro-notes và phân loại theo đúng định dạng JSON đã quy định."
+    
+    model_name = await get_active_gemini_model()
+    url = f"{GEMINI_API_BASE}/{model_name}:generateContent?key={GEMINI_API_KEY}"
     
     payload = {
         "systemInstruction": {"parts": [{"text": SECOND_BRAIN_SYSTEM_INSTRUCTION}]},
         "contents": [{"role": "user", "parts": [{"text": ai_prompt}]}],
-        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
+        "generationConfig": {"temperature": 0.2}
     }
 
     try:
-        status, data, err_text = await gemini_generate(payload, timeout=90)
-        if status == 200:
-            ai_response = extract_gemini_text(data)
-            
-            if ai_response.startswith("```json"): ai_response = ai_response[7:]
-            if ai_response.startswith("```"): ai_response = ai_response[3:]
-            if ai_response.endswith("```"): ai_response = ai_response[:-3]
+        session = await get_http_session()
+        async with session.post(url, json=payload, timeout=45) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                ai_response = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                
+                if ai_response.startswith("```json"): ai_response = ai_response[7:]
+                if ai_response.startswith("```"): ai_response = ai_response[3:]
+                if ai_response.endswith("```"): ai_response = ai_response[:-3]
 
-            parsed_json = json.loads(ai_response.strip())
-            summary = parsed_json.get("summary", "Không có tóm tắt.")
-            categories = parsed_json.get("categories", {})
+                parsed_json = json.loads(ai_response.strip())
+                summary = parsed_json.get("summary", "Không có tóm tắt.")
+                micro_notes = parsed_json.get("micro_notes", {})
+                categories = parsed_json.get("categories", {})
 
-            # 4. Lưu Báo cáo tổng hợp
-            report_text = f"\n\n## Báo cáo {days} ngày qua (Tạo ngày {get_vn_time()})\n**Tóm tắt:** {summary}\n"
-            save_report_ok = await append_to_github_file("Bao_Cao_Tong_Hop.md", report_text)
-            if not save_report_ok:
-                await update.message.reply_text("❌ Lỗi: AI đã tổng hợp xong nhưng không thể ghi vào Bao_Cao_Tong_Hop.md trên GitHub (Có thể do xung đột file).")
-                return # Dừng tiến trình, tránh làm mất dữ liệu
+                # 4. Lưu Báo cáo tổng hợp
+                report_text = f"\n\n## Báo cáo {days} ngày qua (Tạo ngày {get_vn_time()})\n**Tóm tắt:** {summary}\n"
+                save_report_ok = await append_to_github_file("Bao_Cao_Tong_Hop.md", report_text)
+                if not save_report_ok:
+                    await update.message.reply_text("❌ Lỗi: Không thể ghi vào Bao_Cao_Tong_Hop.md trên GitHub.")
+                    return
 
-            # 5. Phân phối vào các file mục tiêu
-            distribution_msg = f"✅ **Đã hoàn thành Báo cáo {days} ngày!**\n\n📌 **Tóm tắt:** {summary}\n\n📂 **Phân bổ:**\n"
-            for cat_file, items in categories.items():
-                if items:
-                    formatted_items = "\n".join([f"- [ ] {item}" for item in items])
-                    save_cat_ok = await append_to_github_file(cat_file, f"\n\n### Từ INPUT_BOT ngày {get_vn_time()}:\n{formatted_items}\n")
-                    if save_cat_ok:
-                        distribution_msg += f"- `{cat_file}`: {len(items)} mục\n"
-                    else:
-                        distribution_msg += f"- ❌ Lỗi lưu `{cat_file}`\n"
+                distribution_msg = f"✅ **Đã hoàn thành Báo cáo {days} ngày!**\n\n📌 **Tóm tắt:** {summary}\n\n📂 **Phân bổ & Tạo File:**\n"
 
-            # 6. TỰ ĐỘNG DỌN DẸP / NÉN FILE INPUT_BOT.md
-            new_input_content = header_part + "".join(remaining_text_blocks)
-            save_clean_ok = await overwrite_github_file("INPUT_BOT.md", new_input_content, f"Clean up INPUT_BOT after report: {get_vn_time()}")
-            if save_clean_ok:
-                distribution_msg += f"\n🧹 *Đã dọn sạch các ghi chú đã xử lý khỏi INPUT_BOT.md!*"
-            else:
-                distribution_msg += f"\n⚠️ *Lỗi: Không thể xóa ghi chú cũ trong INPUT_BOT.md!*"
+                # 5A. Tự động tạo hoặc cập nhật các Micro-Notes độc lập (Ví dụ: Phương pháp Zettelkasten.md)
+                for file_name, file_content in micro_notes.items():
+                    if file_content:
+                        clean_file_name = file_name.strip()
+                        if not clean_file_name.endswith(".md"):
+                            clean_file_name += ".md"
+                        
+                        # Kiểm tra xem file đã tồn tại trên GitHub chưa
+                        existing_content = await read_github_file(clean_file_name)
+                        if existing_content:
+                            # Nếu file đã có, bổ sung thêm nội dung mới vào cuối
+                            updated_content = existing_content + f"\n\n---\n*Cập nhật ngày {get_vn_time()} từ Inbox:*\n" + file_content
+                        else:
+                            # Nếu file chưa có, tạo mới hoàn toàn
+                            updated_content = file_content
 
-            await update.message.reply_text(distribution_msg, parse_mode="Markdown")
+                        save_micro_ok = await overwrite_github_file(clean_file_name, updated_content, f"Auto create/update micro-note {clean_file_name}")
+                        if save_micro_ok:
+                            distribution_msg += f"- 📄 Tạo/Cập nhật file độc lập: `{clean_file_name}`\n"
+                        else:
+                            distribution_msg += f"- ❌ Lỗi tạo file `{clean_file_name}`\n"
 
-        elif status == 429:
-            await update.message.reply_text(
-                "⚠️ **Lỗi 429 (Hết hạn mức Gemini):** API key đã vượt giới hạn (số request/phút, token/phút hoặc request/ngày) của mọi model bot thử. Chưa có gì bị ghi/xóa. Chi tiết từ Google:\n"
-                f"`{err_text[:350]}`"
-            )
-        elif status in (500, 503):
-            await update.message.reply_text(
-                f"⚠️ **Lỗi {status} (Quá tải):** Máy chủ Gemini đang bận. Quá trình report đã bị hủy để tránh mất dữ liệu. Bạn đợi vài phút rồi gọi lại `/report` nhé.",
-                parse_mode="Markdown"
-            )
-        elif status == 404:
-            await update.message.reply_text(
-                "⚠️ **Lỗi 404:** Không tìm được model Gemini khả dụng cho API key này. Hãy kiểm tra API key hoặc đặt biến môi trường `GEMINI_MODEL`.",
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text(f"❌ Lỗi từ API Gemini ({status}):\n`{err_text[:200]}`", parse_mode="Markdown")
+                # 5B. Phân phối các mục danh mục thông thường vào file tổng
+                for cat_file, items in categories.items():
+                    if items:
+                        formatted_items = "\n".join([f"- [ ] {item}" for item in items])
+                        save_cat_ok = await append_to_github_file(cat_file, f"\n\n### Từ INPUT_BOT ngày {get_vn_time()}:\n{formatted_items}\n")
+                        if save_cat_ok:
+                            distribution_msg += f"- `{cat_file}`: {len(items)} mục\n"
+                        else:
+                            distribution_msg += f"- ❌ Lỗi lưu `{cat_file}`\n"
 
+                # 6. Dọn dẹp file INPUT_BOT.md
+                new_input_content = header_part + "".join(remaining_text_blocks)
+                save_clean_ok = await overwrite_github_file("INPUT_BOT.md", new_input_content, f"Clean up INPUT_BOT after report: {get_vn_time()}")
+                if save_clean_ok:
+                    distribution_msg += f"\n🧹 *Đã dọn sạch các ghi chú đã xử lý khỏi INPUT_BOT.md!*"
+                else:
+                    distribution_msg += f"\n⚠️ *Lỗi: Không thể xóa ghi chú cũ trong INPUT_BOT.md!*"
+
+                await update.message.reply_text(distribution_msg, parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"❌ Đã xảy ra lỗi hệ thống hoặc phân tích JSON: {str(e)}")
+        await update.message.reply_text(f"❌ Lỗi xử lý report: {str(e)}")
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id).strip()
@@ -608,7 +524,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     asyncio.create_task(context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING))
     try:
-        reply_content = await asyncio.wait_for(call_gemini(chat_id, user_text), timeout=70.0)
+        reply_content = await asyncio.wait_for(call_gemini(chat_id, user_text), timeout=45.0)
         await update.message.reply_text(reply_content)
         asyncio.create_task(log_to_sheet(chat_id, sender_name, user_text, reply_content))
     except Exception as e:
